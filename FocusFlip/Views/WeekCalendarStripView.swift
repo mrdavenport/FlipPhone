@@ -24,8 +24,10 @@ struct WeekCalendarStripView: View {
                     dayCell(for: date)
                 }
             }
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Day cell

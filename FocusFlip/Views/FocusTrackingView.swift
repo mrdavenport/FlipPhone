@@ -304,7 +304,8 @@ struct FocusTrackingView: View {
         VStack(spacing: 0) {
             Spacer().frame(height: 148)
             heroBadgeContent
-                .frame(width: 280, height: 280)
+                .frame(maxWidth: 300)
+                .aspectRatio(393.0 / 280.0, contentMode: .fit)
                 .matchedGeometryEffect(
                     id: "dailyBadge",
                     in: badgeNamespace,
@@ -322,7 +323,28 @@ struct FocusTrackingView: View {
     @ViewBuilder
     private var heroBadgeContent: some View {
         #if canImport(RiveRuntime)
-        if Bundle.main.url(forResource: "flipphone_hero", withExtension: "riv") != nil && heroRiveLoaded {
+        if let milestone = todayDailyMilestone,
+           Bundle.main.url(forResource: "flipphone_logo", withExtension: "riv") != nil && heroRiveLoaded {
+            // Day milestone achieved — show the milestone badge Rive (same as SessionResultView)
+            RiveViewWrapper(
+                fileName: "flipphone_logo",
+                autoPlay: true,
+                stateName: "milestoneResults",
+                animationName: nil,
+                uniqueId: "hero-daily-\(milestone.badgeShapeValue)",
+                artboardName: nil,
+                instanceValue: 4.0,
+                colorInputs: [
+                    "themeColor": todayMilestoneColor
+                ],
+                numberInputs: [
+                    "badgeShapeValue": milestone.badgeShapeValue
+                ],
+                artboardInputs: nil
+            )
+            .id("hero-daily-\(milestone.badgeShapeValue)")
+        } else if Bundle.main.url(forResource: "flipphone_hero", withExtension: "riv") != nil && heroRiveLoaded {
+            // No day milestone yet — show original hero-stars animation
             RiveViewWrapper(
                 fileName: "flipphone_hero",
                 autoPlay: true,
