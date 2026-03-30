@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		208C66B72F6A29A7006645C9 /* RiveRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = 200A52C12EBE637A00FC0C0F /* RiveRuntime */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		200A527B2EBE637B00FC0C0F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,9 +28,11 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		200A52682EBE637A00FC0C0F /* FocusFlip.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FocusFlip.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		200A52682EBE637A00FC0C0F /* FlipPhone.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FlipPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		200A527A2EBE637B00FC0C0F /* FocusFlipTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FocusFlipTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		200A52842EBE637B00FC0C0F /* FocusFlipUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FocusFlipUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		200A52B02EBE637A00FC0C0F /* FocusFlip/flipphone_hero.riv */ = {isa = PBXFileReference; lastKnownFileType = file; path = FocusFlip/flipphone_hero.riv; sourceTree = SOURCE_ROOT; };
+		200A52B12EBE637A00FC0C0F /* FocusFlip/Rive/flipphone_logo.riv */ = {isa = PBXFileReference; lastKnownFileType = file; path = FocusFlip/Rive/flipphone_logo.riv; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -52,6 +58,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				208C66B72F6A29A7006645C9 /* RiveRuntime in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +85,7 @@
 				200A526A2EBE637A00FC0C0F /* FocusFlip */,
 				200A527D2EBE637B00FC0C0F /* FocusFlipTests */,
 				200A52872EBE637B00FC0C0F /* FocusFlipUITests */,
+				200A52B42EBE637A00FC0C0F /* Rive Resources */,
 				200A52692EBE637A00FC0C0F /* Products */,
 			);
 			sourceTree = "<group>";
@@ -85,11 +93,20 @@
 		200A52692EBE637A00FC0C0F /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				200A52682EBE637A00FC0C0F /* FocusFlip.app */,
+				200A52682EBE637A00FC0C0F /* FlipPhone.app */,
 				200A527A2EBE637B00FC0C0F /* FocusFlipTests.xctest */,
 				200A52842EBE637B00FC0C0F /* FocusFlipUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		200A52B42EBE637A00FC0C0F /* Rive Resources */ = {
+			isa = PBXGroup;
+			children = (
+				200A52B02EBE637A00FC0C0F /* FocusFlip/flipphone_hero.riv */,
+				200A52B12EBE637A00FC0C0F /* FocusFlip/Rive/flipphone_logo.riv */,
+			);
+			name = "Rive Resources";
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -112,9 +129,10 @@
 			);
 			name = FocusFlip;
 			packageProductDependencies = (
+				200A52C12EBE637A00FC0C0F /* RiveRuntime */,
 			);
 			productName = FocusFlip;
-			productReference = 200A52682EBE637A00FC0C0F /* FocusFlip.app */;
+			productReference = 200A52682EBE637A00FC0C0F /* FlipPhone.app */;
 			productType = "com.apple.product-type.application";
 		};
 		200A52792EBE637B00FC0C0F /* FocusFlipTests */ = {
@@ -195,6 +213,9 @@
 			);
 			mainGroup = 200A525F2EBE637A00FC0C0F;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				200A52C02EBE637A00FC0C0F /* XCRemoteSwiftPackageReference "rive-ios" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 200A52692EBE637A00FC0C0F /* Products */;
 			projectDirPath = "";
@@ -399,6 +420,7 @@
 				DEVELOPMENT_TEAM = Z55435799Z;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = FlipPhone;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -409,8 +431,8 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sunnyside.FocusFlip;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = sunnyside.FlipPhone;
+				PRODUCT_NAME = FlipPhone;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -428,6 +450,7 @@
 				DEVELOPMENT_TEAM = Z55435799Z;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = FlipPhone;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -438,8 +461,8 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sunnyside.FocusFlip;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = sunnyside.FlipPhone;
+				PRODUCT_NAME = FlipPhone;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -461,7 +484,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FocusFlip.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FocusFlip";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FlipPhone.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FlipPhone";
 			};
 			name = Debug;
 		};
@@ -480,7 +503,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FocusFlip.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FocusFlip";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FlipPhone.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FlipPhone";
 			};
 			name = Release;
 		};
@@ -558,6 +581,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		200A52C02EBE637A00FC0C0F /* XCRemoteSwiftPackageReference "rive-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/rive-app/rive-ios";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 6.15.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		200A52C12EBE637A00FC0C0F /* RiveRuntime */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 200A52C02EBE637A00FC0C0F /* XCRemoteSwiftPackageReference "rive-ios" */;
+			productName = RiveRuntime;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 200A52602EBE637A00FC0C0F /* Project object */;
 }

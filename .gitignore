@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# Xcode
+DerivedData/
+.build/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+Carthage/Build/
+Pods/
+
+# Swift Package Manager (keep Package.resolved committed for app reproducibility)
+.swiftpm/configuration/registries.json
+
+# Local simulator / container exports (not for version control)
+FocusFlip/Debug/
+
+# Editor / agent tooling (not the app)
+.cursor/
+.agents/
+.claude/
+
+# Node (dev-only dependency in this repo; not part of the iOS target)
+node_modules/
+package.json
+package-lock.json
+
+# App Store marketing assets (large binaries; not shipped in app)
+App Store Screenshots/

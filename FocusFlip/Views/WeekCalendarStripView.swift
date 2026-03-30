@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 7-day horizontal strip centered on today.
+/// 6-day horizontal strip (3 past, today, 2 future) + a fixed calendar icon button on the right.
 /// Today's cell is the matchedGeometryEffect landing target for the hero badge.
 struct WeekCalendarStripView: View {
     let sessions: [FocusSession]
@@ -11,22 +11,35 @@ struct WeekCalendarStripView: View {
 
     private let calendar = Calendar.current
 
-    // 3 past days, today, 3 future days
+    // 3 past days, today, 2 future days (6 total — 7th slot is the calendar icon)
     private var weekDays: [Date] {
         let today = calendar.startOfDay(for: Date())
-        return (-3...3).compactMap { calendar.date(byAdding: .day, value: $0, to: today) }
+        return (-3...2).compactMap { calendar.date(byAdding: .day, value: $0, to: today) }
     }
 
     var body: some View {
-        Button(action: onCalendarTap) {
-            HStack(spacing: 0) {
-                ForEach(weekDays, id: \.self) { date in
-                    dayCell(for: date)
-                }
+        HStack(spacing: 0) {
+            ForEach(weekDays, id: \.self) { date in
+                dayCell(for: date)
+            }
+
+            // Fixed calendar icon — always opens the full calendar.
+            // Uses highPriorityGesture so it wins over the full-screen background
+            // tap-to-collapse gesture on heroAndSubheaderView.
+            VStack(spacing: 4) {
+                Text(" ")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                Image(systemName: "calendar")
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundStyle(.white)
+                    .frame(width: 48, height: 48)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 1))
             }
             .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+            .highPriorityGesture(TapGesture().onEnded { onCalendarTap() })
         }
-        .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
     }
 
@@ -160,11 +173,7 @@ struct WeekCalendarStripView: View {
     }
 
     private func loadSVG(named badgeName: String, isCompleted: Bool, color: Color) -> AnyView? {
-        let url = Bundle.main.url(forResource: badgeName, withExtension: "svg", subdirectory: "Badges")
-            ?? Bundle.main.url(forResource: badgeName, withExtension: "svg")
-        guard let url,
-              let data = try? Data(contentsOf: url),
-              let svgString = String(data: data, encoding: .utf8) else { return nil }
+        guard let svgString = SVGCache.shared.rawSVG(named: badgeName) else { return nil }
         return AnyView(SVGColorReplacementView(
             svgString: svgString,
             replacementColor: isCompleted ? color : .white,

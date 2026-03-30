@@ -12,7 +12,7 @@ struct MilestonesView: View {
     let sessions: [FocusSession]
     @State private var selectedSessionForDetail: FocusSession?
     @State private var selectedMilestoneForList: Milestone?
-    @State private var isLoading = true
+    @State private var isLoading = false
     
     var body: some View {
         ZStack {
@@ -54,11 +54,25 @@ struct MilestonesView: View {
                 selectedSessionForDetail = nil
             }
         }
-        .onAppear {
-            // Show skeletons briefly, then fade in real badges
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                isLoading = false
+        .task {
+            // Pre-render all badge+color combinations so cells show UIImages instantly
+            let pairs: [(name: String, color: Color)] = availableMilestones.compactMap { milestone in
+                let primary = "badge-\(milestone.label)"
+                let name: String
+                if SVGCache.shared.rawSVG(named: primary) != nil {
+                    name = primary
+                } else {
+                    let sanitized = "badge-\(milestone.label.replacingOccurrences(of: "+", with: "plus"))"
+                    guard SVGCache.shared.rawSVG(named: sanitized) != nil else { return nil }
+                    name = sanitized
+                }
+                let isCompleted = isMilestoneCompleted(milestone)
+                let color: Color = isCompleted
+                    ? (sessionForMilestone(milestone)?.category.color ?? Color(red: 1.0, green: 0.84, blue: 0.0))
+                    : .white
+                return (name, color)
             }
+            await BadgeImageCache.shared.prefetch(badges: pairs)
         }
     }
     
@@ -110,8 +124,6 @@ struct MilestonesView: View {
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 20)
-        .opacity(isLoading ? 0 : 1)
-        .animation(.easeIn(duration: 0.3), value: isLoading)
     }
     
     // Helper to format the date when a milestone was achieved
@@ -233,37 +245,27 @@ struct MilestonesView: View {
         } label: {
             ZStack(alignment: .topTrailing) {
                 VStack(spacing: 8) {
-                    // Show skeleton while loading, otherwise show badge
-                    if isLoading {
-                        skeletonImage(for: milestone)
-                            .frame(width: 103, height: 103)
-                            .aspectRatio(1, contentMode: .fit)
-                    } else {
-                        badgeImage(for: milestone, isCompleted: isCompleted, categoryColor: categoryColor)
-                            .frame(width: 103, height: 103)
-                            .aspectRatio(1, contentMode: .fit)
-                    }
-                    
-                    // Only show label for incomplete milestones (and not while loading)
-                    if !isCompleted && !isLoading {
+                    resolvedBadgeView(for: milestone, isCompleted: isCompleted, categoryColor: categoryColor)
+                        .frame(width: 103, height: 103)
+                        .aspectRatio(1, contentMode: .fit)
+
+                    if !isCompleted {
                         Text(milestone.label)
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundColor(.white.opacity(0.5))
                             .multilineTextAlignment(.center)
                             .lineLimit(2)
                     }
-                    
-                    // Show date if completed (and not while loading)
-                    if isCompleted && !isLoading, let session = session {
+
+                    if isCompleted, let session = session {
                         Text(formattedDate(for: session.endTime))
                             .font(.system(size: 10, weight: .regular, design: .rounded))
                             .foregroundColor(.white.opacity(0.5))
                     }
                 }
                 .frame(maxWidth: .infinity)
-                
-                // Achievement count badge - only show if count > 1 and not loading
-                if achievementCount > 1 && !isLoading {
+
+                if achievementCount > 1 {
                     Text("\(achievementCount)")
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
@@ -279,90 +281,28 @@ struct MilestonesView: View {
         .disabled(!isCompleted)
     }
     
-    // Helper function to create skeleton placeholder using native SwiftUI shapes
-    private func skeletonImage(for milestone: Milestone) -> some View {
-        // Simple rounded rectangle skeleton - fast and native
-        RoundedRectangle(cornerRadius: 20)
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(0.08),
-                        Color.white.opacity(0.12),
-                        Color.white.opacity(0.08)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-            .frame(width: 103, height: 103)
-            .overlay(
-                RoundedRectangle(cornerRadius: 20)
-                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
-            )
-    }
-    
-    // Helper function to load and display badge SVG with selective color replacement
-    private func badgeImage(for milestone: Milestone, isCompleted: Bool, categoryColor: Color) -> some View {
-        let badgeName = "badge-\(milestone.label)"
-        
-        // Try loading SVG and replacing the specific color
-        if let svgView = loadSVGWithColorReplacement(badgeName: badgeName, isCompleted: isCompleted, categoryColor: categoryColor) {
-            return AnyView(svgView)
-        }
-        
-        // Handle 24hr+ case - try with "plus" instead of "+"
-        let sanitizedLabel = milestone.label.replacingOccurrences(of: "+", with: "plus")
-        let sanitizedBadgeName = "badge-\(sanitizedLabel)"
-        if let svgView = loadSVGWithColorReplacement(badgeName: sanitizedBadgeName, isCompleted: isCompleted, categoryColor: categoryColor) {
-            return AnyView(svgView)
-        }
-        
-        // Final fallback: system icon
-        return AnyView(
+    /// Resolves the badge SVG name and returns an AsyncBadgeImageView (UIImage from cache)
+    /// with grayscale/opacity applied for incomplete milestones — matching the original
+    /// SVGColorReplacementView treatment but without a WKWebView per cell.
+    @ViewBuilder
+    private func resolvedBadgeView(for milestone: Milestone, isCompleted: Bool, categoryColor: Color) -> some View {
+        let primary = "badge-\(milestone.label)"
+        let sanitized = "badge-\(milestone.label.replacingOccurrences(of: "+", with: "plus"))"
+        let resolvedName: String? = SVGCache.shared.rawSVG(named: primary) != nil ? primary
+            : SVGCache.shared.rawSVG(named: sanitized) != nil ? sanitized
+            : nil
+        // Incomplete badges use white so the grayscale+opacity treatment gives a muted look
+        let renderColor: Color = isCompleted ? categoryColor : .white
+
+        if let name = resolvedName {
+            AsyncBadgeImageView(badgeName: name, color: renderColor)
+                .grayscale(isCompleted ? 0 : 1)
+                .opacity(isCompleted ? 1.0 : 0.5)
+        } else {
             Image(systemName: milestone.icon)
                 .font(.system(size: 24, weight: .semibold, design: .rounded))
                 .foregroundColor(isCompleted ? categoryColor : .white.opacity(0.3))
-        )
-    }
-    
-    // Helper to load SVG and replace #8A49F4 with theme color
-    private func loadSVGWithColorReplacement(badgeName: String, isCompleted: Bool, categoryColor: Color) -> AnyView? {
-        // Try loading from Badges folder
-        var url: URL?
-        
-        // Try 1: Badges subdirectory
-        url = Bundle.main.url(forResource: badgeName, withExtension: "svg", subdirectory: "Badges")
-        if url == nil {
-            // Try 2: Root bundle (fallback)
-            url = Bundle.main.url(forResource: badgeName, withExtension: "svg")
         }
-        
-        guard let fileURL = url else {
-            #if DEBUG
-            print("⚠️ Badge SVG file not found: \(badgeName).svg")
-            #endif
-            return nil
-        }
-        
-        // Load SVG data and replace color
-        guard let svgData = try? Data(contentsOf: fileURL),
-              let svgString = String(data: svgData, encoding: .utf8) else {
-            #if DEBUG
-            print("⚠️ Failed to load SVG data from: \(fileURL.path)")
-            #endif
-            return nil
-        }
-        
-        #if DEBUG
-        print("✅ Successfully loaded SVG from Badges folder: \(badgeName).svg")
-        #endif
-        
-        // Use SVGColorReplacementView to selectively replace #8A49F4
-        return AnyView(SVGColorReplacementView(
-            svgString: svgString,
-            replacementColor: isCompleted ? categoryColor : Color.white,
-            isCompleted: isCompleted
-        ))
     }
 }
 
@@ -398,42 +338,30 @@ struct SVGColorReplacementView: View {
     let svgString: String
     let replacementColor: Color
     let isCompleted: Bool
-    
-    // Computed property to replace #8A49F4 with the replacement color hex value
+
+    // Color-replaced SVG. Uses a hash of svgString as the cache key so the
+    // same badge+color result is computed only once per session.
     private var modifiedSVG: String {
-        let replacementHex = replacementColor.toHexString()
-        let replacementHexNoHash = replacementHex.replacingOccurrences(of: "#", with: "")
-        
-        // Replace #8A49F4 (with hash)
-        var result = svgString.replacingOccurrences(
-            of: "#8A49F4",
-            with: replacementHex,
-            options: .caseInsensitive
-        )
-        // Replace 8A49F4 (without hash)
-        result = result.replacingOccurrences(
-            of: "8A49F4",
-            with: replacementHexNoHash,
-            options: .caseInsensitive
-        )
-        // Replace #8a49f4 (lowercase with hash)
-        result = result.replacingOccurrences(
-            of: "#8a49f4",
-            with: replacementHex,
-            options: .caseInsensitive
-        )
-        // Replace 8a49f4 (lowercase without hash)
-        result = result.replacingOccurrences(
-            of: "8a49f4",
-            with: replacementHexNoHash,
-            options: .caseInsensitive
-        )
-        
+        let hex = replacementColor.toHexString()
+        let cacheKey = "\(svgString.hashValue)|\(hex)" as NSString
+        let colorCache = SVGColorReplacementView._colorCache
+        if let cached = colorCache.object(forKey: cacheKey) {
+            return cached as String
+        }
+        let hexNoHash = hex.replacingOccurrences(of: "#", with: "")
+        let result = svgString
+            .replacingOccurrences(of: "#8A49F4", with: hex, options: .caseInsensitive)
+            .replacingOccurrences(of: "8A49F4",  with: hexNoHash, options: .caseInsensitive)
+            .replacingOccurrences(of: "#8a49f4", with: hex, options: .caseInsensitive)
+            .replacingOccurrences(of: "8a49f4",  with: hexNoHash, options: .caseInsensitive)
+        colorCache.setObject(result as NSString, forKey: cacheKey)
         return result
     }
-    
+
+    // Shared cache: (svgHash|hexColor) → replaced SVG string
+    private static let _colorCache = NSCache<NSString, NSString>()
+
     var body: some View {
-        // Render using WKWebView
         SVGWebView(svgString: modifiedSVG)
             .grayscale(isCompleted ? 0 : 1)
             .opacity(isCompleted ? 1.0 : 0.5)

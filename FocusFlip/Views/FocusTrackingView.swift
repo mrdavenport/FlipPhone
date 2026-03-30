@@ -25,6 +25,18 @@ private enum Timeframe: String, CaseIterable, Identifiable {
     }
 }
 
+#if DEBUG
+/// Set `sendLastSessionDurationWhenAnimating` to `true` to A/B-test hero `sessionSeconds` during post-session animation; default keeps hero `sessionSeconds` at 0.
+private enum HeroRiveSessionSecondsAB {
+    static var sendLastSessionDurationWhenAnimating: Bool = false
+}
+#endif
+
+/// Spacing between hero Rive `showCumulativeBadge` / first layout and the start of `displayedTotalSeconds` + progress-bar count-up (bottom sheet mirrors that value).
+private enum PostSessionPresentationTiming {
+    static let countUpLeadAfterBadgeTrigger: TimeInterval = 0.28
+}
+
 struct FocusTrackingView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
@@ -55,7 +67,32 @@ struct FocusTrackingView: View {
     @State private var lastDisplayedDay: Date? = nil // Track day for star reset
     @State private var showHowToStart = false
     @AppStorage("hasSeenHowToStart") private var hasSeenHowToStart = false
-    
+    @State private var progressBarDisplayValue: Double = 0
+    @State private var justCompletedSession: FocusSession?
+    @State private var displayedTotalSeconds: Double = 0
+    @State private var displayedDailyMilestone: Milestone? = nil
+    @State private var isAnimatingPostSession: Bool = false
+    /// During post-session animation, one-shot triggers for the single hero Rive instance (nil = do not fire on number updates).
+    @State private var heroBadgeBurstTriggers: [String]? = nil
+    /// Bumped when the hero surface is shown again so `showCumulativeBadge` refires even if Rive inputs are unchanged.
+    @State private var heroCumulativeBadgeTriggerNonce: Int = 0
+    /// When true, hero badge number inputs use from→to tier bounds for one frame (paired with `levelUp`).
+    @State private var heroBadgeUseLevelUpNumbers: Bool = false
+    /// Outgoing tier for a level-up frame (set before `displayedDailyMilestone` advances).
+    @State private var heroLevelUpFromMilestone: Milestone? = nil
+    // Tunable via the debug admin panel; persist through the session for tweaking
+    @State private var animStepBaseDuration: Double = 2.1
+    @State private var animStepPauseDuration: Double = 0
+    @State private var showDebugAdmin = false
+    // When true, the DEBUG tier animation keeps the simulated badge / cumulativeSeconds on-screen.
+    // We only reset back to the live state on a hero long-press (not automatically at the end of the sequence).
+    @State private var debugLevelUpSimulationActive: Bool = false
+    /// Cumulative seconds already "locked in" at each post-session tier completion. Do **not** use
+    /// `displayedDailyMilestone?.seconds` as a floor — it can match `todayDailyMilestone` (final tier) and pin the hero badge to e.g. 7hr for the whole sequence.
+    @State private var heroPostSessionCumulativeFloor: Double = 0
+    /// Prior cumulative seconds captured in `completeSession` before the new session is inserted. On dismiss, step building uses this so it matches the frozen hero state (`todayTotalTime - session.duration` can drift from rounding or @Query timing).
+    @State private var postSessionFrozenPriorTotal: Double? = nil
+
     var body: some View {
         GeometryReader { proxy in
             let topInset = proxy.safeAreaInsets.top
@@ -64,7 +101,9 @@ struct FocusTrackingView: View {
             mainContentView(topInset: topInset, screenHeight: screenHeight, proxy: proxy)
         }
         .ignoresSafeArea()
-        .sheet(item: $selectedSessionForDetail) { session in
+        .sheet(item: $selectedSessionForDetail, onDismiss: {
+            collapseBottomSheetForHomeReturn()
+        }) { session in
             SessionResultView(session: session, user: currentUser) {
                 selectedSessionForDetail = nil
             }
@@ -105,12 +144,62 @@ struct FocusTrackingView: View {
                 .presentationDragIndicator(.visible)
                 .presentationBackground(Color(UIColor.secondarySystemBackground))
         }
+        #if DEBUG
+        .sheet(isPresented: $showDebugAdmin) {
+            DebugAdminView(
+                stepDuration: $animStepBaseDuration,
+                pauseDuration: $animStepPauseDuration,
+                sendHeroSessionSecondsWhenAnimating: Binding(
+                    get: { HeroRiveSessionSecondsAB.sendLastSessionDurationWhenAnimating },
+                    set: { HeroRiveSessionSecondsAB.sendLastSessionDurationWhenAnimating = $0 }
+                )
+            ) { testSeconds, fromZeroToday in
+                let priorTime = fromZeroToday ? 0 : todayTotalTime
+                let finalTime = fromZeroToday ? testSeconds : priorTime + testSeconds
+                // Set animation state before clearing the debug sheet so `heroSurfaceCoverPresented`
+                // onChange cannot run `bumpHeroCumulativeBadgeTriggerIfIdle()` while still idle — that
+                // would replace nil `displayedDailyMilestone` with `todayDailyMilestone` and skip the pre-5m flipphone_logo branch.
+                isAnimatingPostSession   = true
+                debugLevelUpSimulationActive = true
+                displayedDailyMilestone = Milestone.dayMilestoneForTotalTime(priorTime)
+                displayedTotalSeconds = priorTime
+                heroPostSessionCumulativeFloor = priorTime
+                heroBadgeUseLevelUpNumbers = false
+                heroLevelUpFromMilestone = nil
+                if fromZeroToday && priorTime == 0 {
+                    heroBadgeBurstTriggers = ["showCumulativeBadge"]
+                    heroCumulativeBadgeTriggerNonce += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                        heroBadgeBurstTriggers = nil
+                    }
+                } else {
+                    heroBadgeBurstTriggers = nil
+                }
+                let steps = buildMilestoneSteps(priorTime: priorTime, finalTime: finalTime)
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+                    isBottomSheetExpanded = false
+                }
+                showDebugAdmin = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    runMilestoneAnimation(steps: steps, index: 0)
+                }
+            }
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(.black)
+        }
+        #endif
         .onAppear {
             AnalyticsService.shared.logScreenView("FocusTracking")
             // Load hero Rive immediately (no delay)
             heroRiveLoaded = true
             // Check for day change to reset stars
             checkForDayChange()
+            // Sync all display state instantly on first appear (no animation)
+            progressBarDisplayValue = dayProgressToNextMilestone
+            displayedTotalSeconds = totalTimeInSeconds
+            displayedDailyMilestone = todayDailyMilestone
+            heroPostSessionCumulativeFloor = 0
             // Auto-present how-to sheet for first-time users
             if !hasSeenHowToStart {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
@@ -134,11 +223,29 @@ struct FocusTrackingView: View {
             // When sessions change, check for day change
             checkForDayChange()
         }
+        .onChange(of: totalTimeInSeconds) { _, newValue in
+            if !isAnimatingPostSession {
+                displayedTotalSeconds = newValue
+            }
+        }
+        .onChange(of: selectedTimeframe) { _, _ in
+            if !isAnimatingPostSession {
+                displayedTotalSeconds = totalTimeInSeconds
+            }
+        }
+        .onChange(of: todayDailyMilestone?.id) { _, _ in
+            if !isAnimatingPostSession {
+                displayedDailyMilestone = todayDailyMilestone
+            }
+        }
         .onDisappear {
             orientationManager.stopMonitoring()
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
             handleScenePhaseChange(from: oldPhase, to: newPhase)
+            if newPhase == .active, !orientationManager.isFaceDown {
+                bumpHeroCumulativeBadgeTriggerIfIdle()
+            }
         }
         .onChange(of: orientationManager.isFaceDown) { oldValue, newValue in
             if oldValue && !newValue {
@@ -168,14 +275,30 @@ struct FocusTrackingView: View {
                 }
             }
         }
-        .sheet(item: $activeSession) { session in
-            SessionResultView(session: session, user: currentUser) {
-                activeSession = nil
+        .sheet(item: $activeSession, onDismiss: {
+            collapseBottomSheetForHomeReturn()
+
+            let frozenPrior = postSessionFrozenPriorTotal
+            postSessionFrozenPriorTotal = nil
+
+            if let completedSession = justCompletedSession {
+                let priorTime = frozenPrior ?? max(0, todayTotalTime - completedSession.duration)
+                let finalTime = todayTotalTime
+                let steps = buildMilestoneSteps(priorTime: priorTime, finalTime: finalTime)
+                // Re-sync to pre-session tier (not `todayDailyMilestone`, which is already the final tier after save).
+                displayedDailyMilestone = Milestone.dayMilestoneForTotalTime(priorTime)
+                heroPostSessionCumulativeFloor = priorTime
+                justCompletedSession = nil
+
+                // Brief pause so the sheet dismiss animation clears before the sequence begins
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    runMilestoneAnimation(steps: steps, index: 0)
+                }
             }
-        }
-        .sheet(item: $selectedSessionForDetail) { session in
+        }) { session in
             SessionResultView(session: session, user: currentUser) {
-                selectedSessionForDetail = nil
+                justCompletedSession = session
+                activeSession = nil
             }
         }
     }
@@ -236,8 +359,32 @@ struct FocusTrackingView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 24)
             .ignoresSafeArea(edges: .bottom)
+
         }
         .frame(width: proxy.size.width, height: proxy.size.height)
+        .onAppear {
+            bumpHeroCumulativeBadgeTriggerIfIdle()
+        }
+        .onChange(of: orientationManager.isFaceDown) { wasFaceDown, isFaceDown in
+            if wasFaceDown && !isFaceDown {
+                bumpHeroCumulativeBadgeTriggerIfIdle()
+            }
+        }
+        .onChange(of: heroSurfaceCoverPresented) { wasCovered, isCovered in
+            if wasCovered && !isCovered {
+                bumpHeroCumulativeBadgeTriggerIfIdle()
+            }
+        }
+        .onChange(of: isAnimatingPostSession) { wasAnimating, isAnimating in
+            if wasAnimating && !isAnimating {
+                bumpHeroCumulativeBadgeTriggerIfIdle()
+            }
+        }
+        .onChange(of: isBottomSheetExpanded) { wasExpanded, isExpanded in
+            if wasExpanded && !isExpanded {
+                bumpHeroCumulativeBadgeTriggerIfIdle()
+            }
+        }
         
         toolbar(topInset: topInset)
             .zIndex(100) // Ensure toolbar is on top
@@ -248,6 +395,7 @@ struct FocusTrackingView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
+
     
     private var heroAndSubheaderView: some View {
         VStack(spacing: 0) {
@@ -282,9 +430,23 @@ struct FocusTrackingView: View {
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                     isBottomSheetExpanded = false
                 }
-            } else if !orientationManager.isFaceDown {
-                showHowToStart = true
             }
+        }
+        .onLongPressGesture(minimumDuration: 0.6) {
+            #if DEBUG
+            // If a DEBUG tier animation simulation is active, this long-press is the "acknowledge/reset" moment.
+            if debugLevelUpSimulationActive {
+                debugLevelUpSimulationActive = false
+                isAnimatingPostSession = false
+                heroBadgeBurstTriggers = nil
+                heroBadgeUseLevelUpNumbers = false
+                heroLevelUpFromMilestone = nil
+                heroPostSessionCumulativeFloor = 0
+                displayedDailyMilestone = todayDailyMilestone
+                displayedTotalSeconds = totalTimeInSeconds
+            }
+            showDebugAdmin = true
+            #endif
         }
         .overlay(
             // Dark overlay when settings or streak stats sheets are active
@@ -306,46 +468,84 @@ struct FocusTrackingView: View {
             heroBadgeContent
                 .frame(maxWidth: 300)
                 .aspectRatio(393.0 / 280.0, contentMode: .fit)
+                // Opacity animates independently via the explicit spring below.
+                // matchedGeometryEffect sits outside that scope so its position
+                // transition is driven solely by the withAnimation context from
+                // BottomSheetView — preventing a double-spring y-jump on collapse.
+                .opacity(isBottomSheetExpanded ? 0 : 1)
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isBottomSheetExpanded)
                 .matchedGeometryEffect(
                     id: "dailyBadge",
                     in: badgeNamespace,
                     isSource: !isBottomSheetExpanded
                 )
-                .opacity(isBottomSheetExpanded ? 0 : 1)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !isBottomSheetExpanded else { return }
+                    #if DEBUG
+                    // QA sequence: tap at end of sequence ends the preview and returns to actual values
+                    if debugLevelUpSimulationActive {
+                        debugLevelUpSimulationActive = false
+                        isAnimatingPostSession = false
+                        heroBadgeBurstTriggers = nil
+                        heroBadgeUseLevelUpNumbers = false
+                        heroLevelUpFromMilestone = nil
+                        heroPostSessionCumulativeFloor = 0
+                        displayedDailyMilestone = todayDailyMilestone
+                        displayedTotalSeconds = totalTimeInSeconds
+                        return
+                    }
+                    #endif
+                    showFullCalendar = true
+                    AnalyticsService.shared.logButtonTap("hero_calendar")
+                }
+            heroBadgeProgressIndicator
+                .padding(.top, 12)
+                .opacity(isBottomSheetExpanded || (displayedNextMilestone == nil && !isAnimatingPostSession) ? 0 : 1)
                 .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isBottomSheetExpanded)
+                .allowsHitTesting(false)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
-        .allowsHitTesting(false)
+        // Spacers have no contentShape so they pass taps through to heroAndSubheaderView.
+        // Only the badge content area above captures taps.
     }
 
     @ViewBuilder
     private var heroBadgeContent: some View {
         #if canImport(RiveRuntime)
-        if let milestone = todayDailyMilestone,
+        heroDailyBadgeRiveView
+        #else
+        heroBadgeFallback
+        #endif
+    }
+
+    /// Single hero-daily Rive instance (stable identity) so post-session level-ups do not reload the file per tier cut.
+    @ViewBuilder
+    private var heroDailyBadgeRiveView: some View {
+        #if canImport(RiveRuntime)
+        if (displayedDailyMilestone != nil || isAnimatingPostSession),
            Bundle.main.url(forResource: "flipphone_logo", withExtension: "riv") != nil && heroRiveLoaded {
-            // Day milestone achieved — show the milestone badge Rive (same as SessionResultView)
-            RiveViewWrapper(
+            RiveViewWrapperNewAPI(
                 fileName: "flipphone_logo",
                 autoPlay: true,
                 stateName: "milestoneResults",
                 animationName: nil,
-                uniqueId: "hero-daily-\(milestone.badgeShapeValue)",
+                uniqueId: "hero-daily",
                 artboardName: nil,
                 instanceValue: 4.0,
                 colorInputs: [
                     "themeColor": todayMilestoneColor
                 ],
-                numberInputs: [
-                    "badgeShapeValue": milestone.badgeShapeValue
-                ],
-                artboardInputs: nil
+                numberInputs: heroDailyBadgeNumberInputs(),
+                artboardInputs: nil,
+                triggerInputs: heroBadgeTriggerInputsForRive,
+                triggerReloadNonce: heroCumulativeBadgeTriggerNonce
             )
-            .id("hero-daily-\(milestone.badgeShapeValue)")
+            .id("hero-daily")
         } else if Bundle.main.url(forResource: "flipphone_hero", withExtension: "riv") != nil && heroRiveLoaded {
-            // No day milestone yet — show original hero-stars animation
-            RiveViewWrapper(
+            RiveViewWrapperNewAPI(
                 fileName: "flipphone_hero",
                 autoPlay: true,
                 stateName: "hero-stars",
@@ -382,6 +582,141 @@ struct FocusTrackingView: View {
         }
     }
 
+    /// Subtle progress bar with tier start/end labels above each end
+    private var heroBadgeProgressIndicator: some View {
+        VStack(spacing: 4) {
+            // Tier labels above bar ends — left is hidden on the first step (no milestone yet)
+            HStack {
+                if let left = currentMilestoneShortLabel {
+                    Text(left)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.white.opacity(0.4))
+                }
+                Spacer()
+                if let right = nextMilestoneShortLabel {
+                    Text(right)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(Color.white.opacity(0.4))
+                }
+            }
+            .frame(width: 180)
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(width: 180, height: 3)
+                Capsule()
+                    .fill(Color.white.opacity(0.5))
+                    .frame(width: max(6, 180 * progressBarDisplayValue), height: 3)
+            }
+        }
+    }
+
+    /// Short display label for the current milestone threshold (nil when no milestone yet).
+    /// Tracks `displayedDailyMilestone` so labels update in step with the animation sequence.
+    private var currentMilestoneShortLabel: String? {
+        guard let m = displayedDailyMilestone else { return nil }
+        return milestoneShortLabel(m)
+    }
+
+    /// Short display label for the next milestone threshold.
+    /// Tracks `displayedNextMilestone` so labels update in step with the animation sequence.
+    private var nextMilestoneShortLabel: String? {
+        guard let m = displayedNextMilestone else { return nil }
+        return milestoneShortLabel(m)
+    }
+
+    private func milestoneShortLabel(_ milestone: Milestone) -> String {
+        milestone.metaTag == "hr"
+            ? "\(milestone.milestoneTime)h"
+            : "\(milestone.milestoneTime)m"
+    }
+
+    /// Next daily milestone threshold strictly after `milestone` (for per-badge tier span on hero / level-up stack).
+    private func nextMilestoneAfter(_ milestone: Milestone) -> Milestone? {
+        Milestone.nextInSequence(after: milestone)
+    }
+
+    /// `sessionSeconds` on hero: 0 in Release; DEBUG can enable last-session duration while post-session animation runs (see `HeroRiveSessionSecondsAB`).
+    private func heroSessionSecondsForRive() -> Double {
+        #if DEBUG
+        if HeroRiveSessionSecondsAB.sendLastSessionDurationWhenAnimating,
+           isAnimatingPostSession,
+           let session = justCompletedSession {
+            return session.duration
+        }
+        #endif
+        return 0
+    }
+
+    /// Hero Rive numbers: cumulative + tier bounds for **this** `milestone` + optional session length for testing.
+    private func heroNumberInputs(for milestone: Milestone) -> [String: Double] {
+        let cumulative: Double
+        if isAnimatingPostSession {
+            cumulative = max(displayedTotalSeconds, heroPostSessionCumulativeFloor)
+        } else {
+            cumulative = todayTotalTime
+        }
+        let fromTier = Double(milestone.seconds)
+        let toTier = Double(nextMilestoneAfter(milestone)?.seconds ?? milestone.seconds)
+        return [
+            "cumulativeSeconds": cumulative,
+            "cumulativeFromTierSeconds": fromTier,
+            "cumulativeToTierSeconds": toTier,
+            "sessionSeconds": heroSessionSecondsForRive()
+        ]
+    }
+
+    /// Tier-cut frame: `from` and `to` are daily milestone thresholds (seconds). Uses canonical next-in-sequence
+    /// so badges never jump out of order (e.g. 13h → 15h → 14h).
+    ///
+    /// **Do not** pass `displayedTotalSeconds` as `cumulativeSeconds` here — it still tracks the bar animation
+    /// and can sit *below* the outgoing tier (e.g. 6h total while FT/TT are 7h/8h), so Rive shows CS out of
+    /// sync with FT/TT. We send tier-boundary seconds only; Rive should bind the outgoing label to
+    /// `cumulativeFromTierSeconds`, incoming to `cumulativeToTierSeconds`, and use `cumulativeSeconds`
+    /// as the post-crossing total anchor (matches TT / new tier lower bound).
+    private func heroNumberInputsForLevelUp(from fromMilestone: Milestone, to toMilestoneFromStep: Milestone) -> [String: Double] {
+        let toMilestone = Milestone.nextInSequence(after: fromMilestone) ?? toMilestoneFromStep
+        let fromS = Double(fromMilestone.seconds)
+        let toS = Double(toMilestone.seconds)
+        return [
+            "cumulativeSeconds": toS,
+            "cumulativeFromTierSeconds": fromS,
+            "cumulativeToTierSeconds": toS,
+            "sessionSeconds": heroSessionSecondsForRive()
+        ]
+    }
+
+    /// Before the first daily milestone (0 → first threshold): tier span 0 → first milestone seconds.
+    private func heroNumberInputsPreFirstDailyMilestone() -> [String: Double] {
+        let firstTh = Double(Milestone.allMilestones.first?.seconds ?? 0)
+        let cumulative = max(displayedTotalSeconds, heroPostSessionCumulativeFloor)
+        return [
+            "cumulativeSeconds": cumulative,
+            "cumulativeFromTierSeconds": 0,
+            "cumulativeToTierSeconds": firstTh,
+            "sessionSeconds": heroSessionSecondsForRive()
+        ]
+    }
+
+    /// Triggers for the single hero-daily Rive: idle always shows cumulative; during post-session, only when `heroBadgeBurstTriggers` is set (avoids firing on every `cumulativeSeconds` keyframe).
+    private var heroBadgeTriggerInputsForRive: [String]? {
+        if isAnimatingPostSession {
+            return heroBadgeBurstTriggers
+        }
+        return ["showCumulativeBadge"]
+    }
+
+    private func heroDailyBadgeNumberInputs() -> [String: Double] {
+        if heroBadgeUseLevelUpNumbers, let from = heroLevelUpFromMilestone, let to = displayedDailyMilestone {
+            return heroNumberInputsForLevelUp(from: from, to: to)
+        }
+        if let m = displayedDailyMilestone {
+            return heroNumberInputs(for: m)
+        }
+        return heroNumberInputsPreFirstDailyMilestone()
+    }
+
     @ViewBuilder
     private func heroLogoView(geometry: GeometryProxy) -> some View {
         ZStack {
@@ -390,7 +725,7 @@ struct FocusTrackingView: View {
                 #if canImport(RiveRuntime)
                 // Lazy-load the heavy Rive file to avoid blocking UI
                 if Bundle.main.url(forResource: "flipphone_hero", withExtension: "riv") != nil && heroRiveLoaded {
-                    RiveViewWrapper(
+                    RiveViewWrapperNewAPI(
                         fileName: "flipphone_hero",
                         autoPlay: true,
                         stateName: "hero-stars",  // State for hero/home screen with shooting stars
@@ -472,6 +807,8 @@ struct FocusTrackingView: View {
                             categoryFilterSection
                             
                             statCardsGrid
+                            
+                            topSessionsSection
                             
                             sessionsSection
                                 .id("sessionsSection")
@@ -864,12 +1201,12 @@ struct FocusTrackingView: View {
             
             // Total time (primary, large) - center aligned with counting animation
             AnimatingNumberText(
-                value: totalTimeInSeconds,
+                value: displayedTotalSeconds,
                 formatter: formatTotalTime
             )
-            .font(.system(size: 48, weight: .bold, design: .rounded))
-            .foregroundColor(.white)
-            .padding(.top, 4)
+                .font(.system(size: 48, weight: .bold, design: .rounded))
+                .foregroundColor(.white)
+                .padding(.top, 4)
             
             // Label - center aligned (dynamic based on category)
             Text(totalTimeLabel)
@@ -968,8 +1305,8 @@ struct FocusTrackingView: View {
         }
         if hours > 0 {
             components.append("\(hours)h")
-        }
-        if minutes > 0 || components.isEmpty {
+            components.append("\(minutes)m")
+        } else if minutes > 0 || components.isEmpty {
             components.append("\(minutes)m")
         }
         
@@ -1072,7 +1409,90 @@ struct FocusTrackingView: View {
         let filtered = filterSessionsByCategory(sessions(for: selectedTimeframe))
         return filtered.max(by: { $0.duration < $1.duration })
     }
-    
+
+    // MARK: - Top Sessions
+
+    private var topSessions: [FocusSession] {
+        let filtered = filterSessionsByCategory(sessions(for: selectedTimeframe))
+        return Array(filtered.sorted(by: { $0.duration > $1.duration }).prefix(3))
+    }
+
+    @ViewBuilder
+    private var topSessionsSection: some View {
+        let top = topSessions
+        if !top.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Top Sessions")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+
+                VStack(spacing: 8) {
+                    ForEach(Array(top.enumerated()), id: \.element.id) { index, session in
+                        Button {
+                            selectedSessionForDetail = session
+                        } label: {
+                            HStack(spacing: 12) {
+                                // Rank number
+                                Text("\(index + 1)")
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.35))
+                                    .frame(width: 16)
+
+                                // Category dot
+                                Circle()
+                                    .fill(session.category.color)
+                                    .frame(width: 8, height: 8)
+
+                                // Duration + optional note
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(session.formattedDuration)
+                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(.white)
+                                    if !session.note.isEmpty {
+                                        Text(session.note)
+                                            .font(.system(size: 12, design: .rounded))
+                                            .foregroundStyle(.white.opacity(0.5))
+                                            .lineLimit(1)
+                                    }
+                                }
+
+                                Spacer()
+
+                                // Category label + date
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(session.category.displayName)
+                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                        .foregroundStyle(session.category.color)
+                                    Text(sessionShortDate(session))
+                                        .font(.system(size: 11, design: .rounded))
+                                        .foregroundStyle(.white.opacity(0.35))
+                                }
+
+                                // Personal best badge
+                                if session.isPersonalRecord {
+                                    Image("personal-best_icn")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 20, height: 20)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .glassEffect()
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func sessionShortDate(_ session: FocusSession) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: session.endTime)
+    }
+
     // Scroll to sessions section
     private func scrollToSessions() {
         // Expand bottom sheet if collapsed
@@ -1203,16 +1623,22 @@ struct FocusTrackingView: View {
     
     private func toolbar(topInset: CGFloat) -> some View {
         ZStack(alignment: .center) {
-            // COLLAPSED state: streak + milestones pills on left, settings on right
+            // COLLAPSED state: streak + milestones on left, ? + settings on right
             HStack {
                 HStack(spacing: 8) {
                     streakCounter
                     milestonesButton
                 }
                 Spacer()
-                toolbarButton(systemName: "gearshape.fill") {
-                    showSettings = true
-                    AnalyticsService.shared.logButtonTap("settings")
+                HStack(spacing: 8) {
+                    toolbarButton(systemName: "questionmark.circle.fill") {
+                        showHowToStart = true
+                        AnalyticsService.shared.logButtonTap("how_to_start")
+                    }
+                    toolbarButton(systemName: "gearshape.fill") {
+                        showSettings = true
+                        AnalyticsService.shared.logButtonTap("settings")
+                    }
                 }
             }
             .opacity(isBottomSheetExpanded ? 0 : 1)
@@ -1276,10 +1702,10 @@ struct FocusTrackingView: View {
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .foregroundColor(.white)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.white.opacity(0.08))
-            .cornerRadius(20)
+            .padding(.horizontal, 16)
+            .frame(height: 48)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.1), lineWidth: 1))
         }
         .buttonStyle(.plain)
     }
@@ -1296,25 +1722,10 @@ struct FocusTrackingView: View {
     }
     
     private var milestonesButton: some View {
-        Button(action: {
+        toolbarButton(systemName: "trophy.fill") {
             showMilestones = true
             AnalyticsService.shared.logButtonTap("milestones")
-        }) {
-            HStack(spacing: 6) {
-                Image(systemName: "trophy.fill")
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
-                
-                Text("\(totalUnlockedBadges)")
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.white.opacity(0.08))
-            .cornerRadius(20)
         }
-        .buttonStyle(.plain)
     }
     
     private var totalUnlockedBadges: Int {
@@ -1363,20 +1774,47 @@ struct FocusTrackingView: View {
         }
     }
     
+    @ViewBuilder
+    private var toolbarLogoView: some View {
+        #if canImport(RiveRuntime)
+        if Bundle.main.url(forResource: "flipphone_logo", withExtension: "riv") != nil {
+            RiveViewWrapperNewAPI(
+                fileName: "flipphone_logo",
+                autoPlay: true,
+                stateName: "hero",
+                animationName: nil,
+                uniqueId: "toolbar-logo",
+                artboardName: "flipPhone_animations",
+                instanceValue: 0.0
+            )
+            .frame(width: 44, height: 44)
+        } else {
+            Image("AppLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(height: 22)
+        }
+        #else
+        Image("AppLogo")
+            .resizable()
+            .scaledToFit()
+            .frame(height: 22)
+        #endif
+    }
+
     private func toolbarButton(systemName: String, action: @escaping () -> Void) -> some View {
         Button(action: {
-            print("🔵 Toolbar button '\(systemName)' tapped")
             action()
         }) {
             Image(systemName: systemName)
                 .font(.system(size: 18, weight: .semibold, design: .rounded))
                 .foregroundColor(.white)
-                .frame(width: 44, height: 44)
-                .background(Color.white.opacity(0.08))
-                .clipShape(Circle())
+                .frame(width: 48, height: 48)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.1), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .contentShape(Circle()) // Ensure entire circle is tappable
+        .contentShape(Circle())
     }
     
     private var heroView: some View {
@@ -1387,7 +1825,7 @@ struct FocusTrackingView: View {
                     Group {
                     #if canImport(RiveRuntime)
                     if Bundle.main.url(forResource: "flipphone_logo", withExtension: "riv") != nil {
-                        RiveViewWrapper(
+                        RiveViewWrapperNewAPI(
                             fileName: "flipphone_logo",
                             autoPlay: true,
                             stateName: "hero",  // State for hero/home screen
@@ -1513,6 +1951,154 @@ private struct ToastView: View {
         .preferredColorScheme(.dark)
 }
 
+// MARK: - Debug Admin View
+
+#if DEBUG
+/// Sheet presented by long-pressing the home screen hero area.
+/// Lets you tune animation timing and fire a simulated session.
+struct DebugAdminView: View {
+    @Binding var stepDuration: Double
+    @Binding var pauseDuration: Double
+    /// When on, hero Rive gets `sessionSeconds` = last session duration during post-session animation (A/B test).
+    @Binding var sendHeroSessionSecondsWhenAnimating: Bool
+    /// Second parameter: `true` = QA preview with today's cumulative **starting at 0** (final total = first parameter only).
+    let onPlay: (Double, Bool) -> Void
+
+    @State private var selectedSeconds: Double = 3600
+
+    private let testOptions: [(label: String, seconds: Double)] = [
+        ("＋5 min",   300),
+        ("＋30 min",  1800),
+        ("＋1 hr",    3600),
+        ("＋3 hr",    10800),
+        ("＋7 hr",    25200),
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Handle
+            Capsule()
+                .fill(Color.white.opacity(0.2))
+                .frame(width: 36, height: 4)
+                .padding(.top, 12)
+
+            Text("Animation Debug")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.7))
+                .padding(.top, 16)
+
+            VStack(spacing: 20) {
+                // Step duration slider
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Step duration")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Spacer()
+                        Text(String(format: "%.1fs", stepDuration))
+                            .font(.system(size: 13, weight: .semibold, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.yellow)
+                    }
+                    Slider(value: $stepDuration, in: 0.3...4.0, step: 0.1)
+                        .tint(.yellow)
+                }
+
+                // Pause duration slider
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Pause after ding")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Spacer()
+                        Text(String(format: "%.2fs", pauseDuration))
+                            .font(.system(size: 13, weight: .semibold, design: .rounded).monospacedDigit())
+                            .foregroundStyle(.yellow)
+                    }
+                    Slider(value: $pauseDuration, in: 0...2.0, step: 0.05)
+                        .tint(.yellow)
+                }
+
+                Toggle(isOn: $sendHeroSessionSecondsWhenAnimating) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Hero sessionSeconds when animating")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Text("Off = always 0 on hero. On = last session duration during tier animation.")
+                            .font(.system(size: 11, weight: .regular, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
+                }
+                .tint(.yellow)
+
+                // Test session pickers
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Simulate session")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.6))
+                    HStack(spacing: 8) {
+                        ForEach(testOptions, id: \.label) { option in
+                            Button {
+                                selectedSeconds = option.seconds
+                            } label: {
+                                Text(option.label)
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(selectedSeconds == option.seconds ? .black : .white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        selectedSeconds == option.seconds
+                                            ? Color.yellow
+                                            : Color.white.opacity(0.12),
+                                        in: Capsule()
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                // Play: add simulated duration to today's real total (matches a real session).
+                Button {
+                    onPlay(selectedSeconds, false)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "play.fill")
+                        Text("Play (add to today)")
+                    }
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(.black)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(.yellow, in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+
+                // QA: prior cumulative = 0, final = selected duration only (full tier ladder from scratch).
+                Button {
+                    onPlay(selectedSeconds, true)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "0.circle.fill")
+                        Text("QA: Play from 0")
+                    }
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+
+            Spacer()
+        }
+        .background(Color.black)
+    }
+}
+#endif
+
 // MARK: - Animating Number Text
 
 struct AnimatingNumberText: View {
@@ -1548,6 +2134,46 @@ struct AnimatableNumber: AnimatableModifier {
     }
 }
 
+// MARK: - Counting Text (frame-by-frame count-up, data-bound to animations)
+
+/// A text view that conforms to `Animatable` so SwiftUI continuously interpolates
+/// its value on every render frame during a `withAnimation` block — giving a true
+/// count-up effect that stays locked to any co-animated easing curve (e.g. the bar fill).
+struct CountingText: View, Animatable {
+    var value: Double
+    let formatter: (Double) -> String
+
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
+
+    var body: some View {
+        Text(formatter(value))
+            .contentTransition(.numericText(value: value))
+    }
+}
+
+// MARK: - Milestone Animation Step
+
+/// One segment of the multi-milestone post-session sequence.
+struct MilestoneAnimationStep {
+    /// The milestone badge revealed when `completesFullTier` is true.
+    let milestone: Milestone
+    /// Bar fill fraction at the START of this step (0–1 within the tier).
+    let barStart: Double
+    /// Bar fill fraction at the END of this step (0–1 within the tier).
+    let barEnd: Double
+    /// Total focus seconds displayed when the bar starts.
+    let totalAtStart: Double
+    /// Total focus seconds displayed when the bar ends.
+    let totalAtEnd: Double
+    /// Whether this step fills the bar to 100 %, triggering a ding + badge swap.
+    let completesFullTier: Bool
+    /// Wall-clock duration of the fill animation for this step.
+    let duration: Double
+}
+
 // MARK: - Data Helpers
 
 private extension FocusTrackingView {
@@ -1555,6 +2181,33 @@ private extension FocusTrackingView {
         let id = UUID()
         let label: String
         let value: String
+    }
+
+    /// True when a sheet or full-screen flow covers the hero (calendar, session result, settings, etc.).
+    var heroSurfaceCoverPresented: Bool {
+        var covered = showStreakStats || showMilestones || showSettings || showAddSession || showFullCalendar || showHowToStart
+            || selectedSessionForDetail != nil
+            || activeSession != nil
+        #if DEBUG
+        covered = covered || showDebugAdmin
+        #endif
+        return covered
+    }
+
+    func bumpHeroCumulativeBadgeTriggerIfIdle() {
+        guard !isAnimatingPostSession else { return }
+        // After navigation or sheets, @State can lag `todayDailyMilestone`; without a milestone the logo Rive branch is skipped entirely.
+        if displayedDailyMilestone == nil, let live = todayDailyMilestone {
+            displayedDailyMilestone = live
+        }
+        heroCumulativeBadgeTriggerNonce += 1
+    }
+
+    /// Collapse the home bottom sheet when session results close (Done or interactive dismiss).
+    func collapseBottomSheetForHomeReturn() {
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+            isBottomSheetExpanded = false
+        }
     }
     
     var currentUser: User? {
@@ -1615,12 +2268,318 @@ private extension FocusTrackingView {
         return Milestone.dayMilestoneForTotalTime(totalTime)
     }
     
+    /// Total focus time accumulated today in seconds
+    private var todayTotalTime: Double {
+        todaySessions.reduce(0.0) { $0 + $1.duration }
+    }
+    
+    /// The next daily milestone above today's total, or nil if all milestones achieved
+    private var nextDayMilestone: Milestone? {
+        let milestones = Milestone.allMilestones
+        if let current = todayDailyMilestone,
+           let idx = milestones.firstIndex(where: { $0.id == current.id }),
+           idx + 1 < milestones.count {
+            return milestones[idx + 1]
+        } else if todayDailyMilestone == nil {
+            return milestones.first
+        }
+        return nil
+    }
+
+    /// Next milestone relative to `displayedDailyMilestone` — used during the
+    /// multi-step animation so progress-bar labels update in step with the sequence.
+    private var displayedNextMilestone: Milestone? {
+        let milestones = Milestone.allMilestones
+        if let current = displayedDailyMilestone,
+           let idx = milestones.firstIndex(where: { $0.id == current.id }),
+           idx + 1 < milestones.count {
+            return milestones[idx + 1]
+        } else if displayedDailyMilestone == nil {
+            return milestones.first
+        }
+        return nil
+    }
+    
+    /// Progress from current milestone toward the next one, clamped 0–1
+    private var dayProgressToNextMilestone: Double {
+        progressInCurrentTier(forTotalTime: todayTotalTime)
+    }
+
+    /// Returns progress within the current tier for any given total focus time.
+    /// Used to compute the pre-session start value for the fill animation.
+    private func progressInCurrentTier(forTotalTime totalTime: Double) -> Double {
+        guard let next = nextDayMilestone else { return 1.0 }
+        let currentSeconds = Double(todayDailyMilestone?.seconds ?? 0)
+        let nextSeconds = Double(next.seconds)
+        guard nextSeconds > currentSeconds else { return 1.0 }
+        return max(0, min(1, (totalTime - currentSeconds) / (nextSeconds - currentSeconds)))
+    }
+
+    // MARK: - Multi-milestone animation helpers
+
+    /// Builds the ordered sequence of bar-fill steps that animate the user from
+    /// `priorTime` (pre-session total) to `finalTime` (post-session total), crossing
+    /// each milestone tier boundary along the way.
+    private func buildMilestoneSteps(priorTime: Double, finalTime: Double) -> [MilestoneAnimationStep] {
+        let stepBaseDuration = animStepBaseDuration
+        let allMilestones = Milestone.allMilestones
+        var steps: [MilestoneAnimationStep] = []
+
+        let startMilestone = Milestone.dayMilestoneForTotalTime(priorTime)
+        let endMilestone   = Milestone.dayMilestoneForTotalTime(finalTime)
+
+        // First milestone threshold to cross
+        let startTierNextMilestone: Milestone?
+        if let start = startMilestone,
+           let idx = allMilestones.firstIndex(where: { $0.id == start.id }),
+           idx + 1 < allMilestones.count {
+            startTierNextMilestone = allMilestones[idx + 1]
+        } else if startMilestone == nil {
+            startTierNextMilestone = allMilestones.first
+        } else {
+            startTierNextMilestone = nil
+        }
+
+        // Same tier: session didn't cross any milestone boundary
+        if startMilestone?.id == endMilestone?.id {
+            guard let firstNext = startTierNextMilestone else { return [] }
+            let tierStart = Double(startMilestone?.seconds ?? 0)
+            let tierEnd   = Double(firstNext.seconds)
+            guard tierEnd > tierStart else { return [] }
+            let bs = max(0, min(1, (priorTime - tierStart) / (tierEnd - tierStart)))
+            let be = max(0, min(1, (finalTime - tierStart) / (tierEnd - tierStart)))
+            let dur = max(0.35, stepBaseDuration * (be - bs))
+            steps.append(MilestoneAnimationStep(
+                milestone: firstNext,
+                barStart: bs, barEnd: be,
+                totalAtStart: priorTime, totalAtEnd: finalTime,
+                completesFullTier: false,
+                duration: dur
+            ))
+            return steps
+        }
+
+        guard let firstNext = startTierNextMilestone,
+              let firstIdx  = allMilestones.firstIndex(where: { $0.id == firstNext.id }) else {
+            return []
+        }
+        let endIdx = endMilestone.flatMap { m in allMilestones.firstIndex(where: { $0.id == m.id }) } ?? -1
+
+        var currentTotal = priorTime
+
+        // Walk every complete tier from firstNext up to (and including) endMilestone
+        if endIdx >= firstIdx {
+            for i in firstIdx...endIdx {
+                let milestone = allMilestones[i]
+                let tierStartSeconds = Double(i > 0 ? allMilestones[i - 1].seconds : 0)
+                let tierEndSeconds   = Double(milestone.seconds)
+                guard tierEndSeconds > tierStartSeconds else { continue }
+
+                let bs: Double = (i == firstIdx)
+                    ? max(0, (currentTotal - tierStartSeconds) / (tierEndSeconds - tierStartSeconds))
+                    : 0.0
+                let dur = max(0.35, stepBaseDuration * (1.0 - bs))
+
+                steps.append(MilestoneAnimationStep(
+                    milestone: milestone,
+                    barStart: bs, barEnd: 1.0,
+                    totalAtStart: currentTotal, totalAtEnd: tierEndSeconds,
+                    completesFullTier: true,
+                    duration: dur
+                ))
+                currentTotal = tierEndSeconds
+            }
+        }
+
+        // Final partial step: position within the tier above endMilestone (if any)
+        if let endMil = endMilestone {
+            let nextAfterEnd: Milestone? = allMilestones.firstIndex(where: { $0.id == endMil.id })
+                .flatMap { idx in idx + 1 < allMilestones.count ? allMilestones[idx + 1] : nil }
+            let tierStart = Double(endMil.seconds)
+            let tierEnd   = Double(nextAfterEnd?.seconds ?? Int.max)
+            if tierEnd > tierStart, finalTime > tierStart, finalTime < tierEnd {
+                let be = max(0, min(1, (finalTime - tierStart) / (tierEnd - tierStart)))
+                if be > 0 {
+                    let dur = max(0.35, stepBaseDuration * be)
+                    steps.append(MilestoneAnimationStep(
+                        milestone: endMil,
+                        barStart: 0.0, barEnd: be,
+                        totalAtStart: tierStart, totalAtEnd: finalTime,
+                        completesFullTier: false,
+                        duration: dur
+                    ))
+                }
+            }
+        }
+
+        return steps
+    }
+
+    /// Total wall-clock duration of the full step sequence (bar fills + pauses after full tiers).
+    private func totalSequenceDuration(steps: [MilestoneAnimationStep]) -> Double {
+        let fillTime = steps.reduce(0.0) { $0 + $1.duration }
+        let pauseCount = steps.filter { $0.completesFullTier }.count
+        return fillTime + Double(pauseCount) * animStepPauseDuration
+    }
+
+    /// Executes the milestone animation sequence step-by-step.
+    /// Text animates once from session start to end over the full sequence duration so it finishes with the final bar.
+    /// Tier cuts update one Rive instance: level-up number inputs + `levelUp` trigger (no stacked views / reloads).
+    private func runMilestoneAnimation(steps: [MilestoneAnimationStep], index: Int) {
+        guard isAnimatingPostSession else { return }
+        guard index < steps.count else {
+            // DEBUG: keep the simulated cumulativeSeconds/badge until user taps the Rive to end preview.
+            // Do NOT overwrite displayedTotalSeconds/displayedDailyMilestone here — that would swap
+            // env data back to current values and mess up the sequence. Swap only on tap.
+            if debugLevelUpSimulationActive {
+                heroBadgeBurstTriggers = nil
+                heroBadgeUseLevelUpNumbers = false
+                heroLevelUpFromMilestone = nil
+                heroPostSessionCumulativeFloor = 0
+                return
+            }
+
+            // Same-tier / under-threshold sessions never run `levelUp`; keeping `isAnimatingPostSession`
+            // true with `heroBadgeBurstTriggers == nil` suppresses idle `showCumulativeBadge` for seconds
+            // (see `heroBadgeTriggerInputsForRive`). End immediately so the cumulative badge can fire.
+            let celebratedTierCrossing = steps.contains { $0.completesFullTier }
+            if !celebratedTierCrossing {
+                displayedDailyMilestone = todayDailyMilestone
+                displayedTotalSeconds = totalTimeInSeconds
+                heroBadgeBurstTriggers = nil
+                heroBadgeUseLevelUpNumbers = false
+                heroLevelUpFromMilestone = nil
+                heroPostSessionCumulativeFloor = 0
+                isAnimatingPostSession = false
+                return
+            }
+
+            // After a real tier cross, hold the new badge briefly before returning to live idle triggers.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                displayedDailyMilestone = todayDailyMilestone
+                displayedTotalSeconds = totalTimeInSeconds
+                heroBadgeBurstTriggers = nil
+                heroBadgeUseLevelUpNumbers = false
+                heroLevelUpFromMilestone = nil
+                heroPostSessionCumulativeFloor = 0
+                isAnimatingPostSession = false
+            }
+            return
+        }
+
+        let step = steps[index]
+        let sequenceDuration = totalSequenceDuration(steps: steps)
+        let finalTime = steps.last!.totalAtEnd
+
+        if index == 0 {
+            heroBadgeBurstTriggers = ["showCumulativeBadge"]
+            heroBadgeUseLevelUpNumbers = false
+            heroLevelUpFromMilestone = nil
+            // Defer clearing so the first layout pass applies numbers + trigger before idle (nil) burst mode.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                heroBadgeBurstTriggers = nil
+            }
+        }
+
+        // Snap bar to this step's start; text is driven by the single animation below when index == 0
+        progressBarDisplayValue = step.barStart
+        if index == 0 && !debugLevelUpSimulationActive {
+            displayedTotalSeconds = step.totalAtStart
+        }
+
+        // `showCumulativeBadge` already fired above for index == 0. Hold the count-up (bottom sheet +
+        // hero cumulative binding) briefly so the badge transition can read as leading the numbers.
+        let countUpLead: TimeInterval = (index == 0 && !debugLevelUpSimulationActive)
+            ? PostSessionPresentationTiming.countUpLeadAfterBadgeTrigger
+            : 0
+
+        // Small settle delay so the snap renders before the fill begins, then optional lead before count-up
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05 + countUpLead) {
+            if index == 0 && !debugLevelUpSimulationActive {
+                // Single text animation from session start to end, completes when the final bar stops
+                withAnimation(.easeOut(duration: sequenceDuration)) {
+                    displayedTotalSeconds = finalTime
+                }
+            }
+
+            withAnimation(.easeOut(duration: step.duration)) {
+                progressBarDisplayValue = step.barEnd
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + step.duration) {
+                guard isAnimatingPostSession else { return }
+
+                if step.completesFullTier {
+                    let fromMilestone = displayedDailyMilestone
+
+                    // Set level-up number inputs (FT, TT) BEFORE firing levelUp so Rive's phase events
+                    // have cumulativeFromTierSeconds and cumulativeToTierSeconds available when they fire.
+                    if let fromMilestone {
+                        heroLevelUpFromMilestone = fromMilestone
+                        heroBadgeUseLevelUpNumbers = true
+                    }
+                    if debugLevelUpSimulationActive {
+                        displayedTotalSeconds = step.totalAtEnd
+                    }
+                    displayedDailyMilestone = step.milestone
+                    heroPostSessionCumulativeFloor = step.totalAtEnd
+
+                    heroBadgeBurstTriggers = fromMilestone != nil ? ["levelUp"] : ["showCumulativeBadge"]
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                        heroBadgeBurstTriggers = nil
+                    }
+
+                    AudioService.shared.playEndChime()
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + animStepPauseDuration) {
+                        guard isAnimatingPostSession else { return }
+                        heroBadgeUseLevelUpNumbers = false
+                        heroLevelUpFromMilestone = nil
+                        runMilestoneAnimation(steps: steps, index: index + 1)
+                    }
+                } else {
+                    // Final partial fill: swap badge silently if it changed (no pulse)
+                    if !debugLevelUpSimulationActive {
+                        if displayedDailyMilestone?.id != todayDailyMilestone?.id {
+                            displayedDailyMilestone = todayDailyMilestone
+                        }
+                    }
+                    heroBadgeBurstTriggers = nil
+                    heroBadgeUseLevelUpNumbers = false
+                    heroLevelUpFromMilestone = nil
+                    // Still run past the end to trigger the 2s hold then swap back
+                    runMilestoneAnimation(steps: steps, index: steps.count)
+                }
+            }
+        }
+    }
+    
+    /// Formatted label like "20m to 30m" or "45m to 1hr" for the progress indicator
+    private var timeRemainingLabel: String? {
+        guard let next = nextDayMilestone else { return nil }
+        let remaining = Double(next.seconds) - todayTotalTime
+        guard remaining > 0 else { return nil }
+        let formatted: String
+        if remaining < 60 {
+            formatted = "<1m"
+        } else if remaining < 3600 {
+            let mins = Int(ceil(remaining / 60.0))
+            formatted = "\(mins)m"
+        } else {
+            let hours = Int(remaining / 3600)
+            let mins = Int(remaining.truncatingRemainder(dividingBy: 3600) / 60)
+            formatted = mins == 0 ? "\(hours)hr" : "\(hours)hr \(mins)m"
+        }
+        return "\(formatted) to \(next.label)"
+    }
+    
     /// Get badge color for today (from longest session's category)
+    /// Most prominent topic/category color for today (longest session), or lavender when none.
     private var todayMilestoneColor: Color {
         if let topSession = todaySessions.sorted(by: { $0.duration > $1.duration }).first {
             return topSession.category.color
         }
-        return Color(red: 1.0, green: 0.84, blue: 0.0) // Gold fallback
+        return ThemeManager.defaultColor  // Lavender default
     }
     
     /// Calculate star data for today's sessions
@@ -1666,14 +2625,9 @@ private extension FocusTrackingView {
         let starData = starDataForToday
         let starCount = starData.count
         
-        // Set star count and badge shape value
+        // Set star count (hero stars artboard; daily badge uses flipphone_logo + session/cumulative inputs)
         inputs["starCount"] = Double(starCount)
-        if let milestone = todayDailyMilestone {
-            inputs["badgeShapeValue"] = milestone.badgeShapeValue
-        } else {
-            inputs["badgeShapeValue"] = 0.0
-        }
-        
+
         // Global orbit properties (fallbacks when ellipse is not data-bound in Rive)
         inputs["orbitRadius"] = 175.0
         inputs["orbitHeight"] = 0.8
@@ -2030,6 +2984,16 @@ private extension FocusTrackingView {
             pauseCount: orientationManager.pauseCount
         )
         
+        // Freeze display state before the session is persisted so the count-up
+        // and badge swap animations can start from the correct pre-session values.
+        isAnimatingPostSession = true
+        // Use full today total (matches daily milestones), not totalTimeInSeconds (respects chart category filter).
+        let priorBeforeInsert = todayTotalTime
+        displayedTotalSeconds = priorBeforeInsert
+        displayedDailyMilestone = Milestone.dayMilestoneForTotalTime(priorBeforeInsert)
+        heroPostSessionCumulativeFloor = priorBeforeInsert
+        postSessionFrozenPriorTotal = priorBeforeInsert
+
         modelContext.insert(session)
         try? modelContext.save()
         

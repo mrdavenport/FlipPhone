@@ -223,11 +223,7 @@ struct DayMilestoneCalendarView: View {
     }
 
     private func loadSVGWithColorReplacement(named badgeName: String, isCompleted: Bool, color: Color) -> AnyView? {
-        let url = Bundle.main.url(forResource: badgeName, withExtension: "svg", subdirectory: "Badges")
-            ?? Bundle.main.url(forResource: badgeName, withExtension: "svg")
-        guard let url,
-              let data = try? Data(contentsOf: url),
-              let svgString = String(data: data, encoding: .utf8) else { return nil }
+        guard let svgString = SVGCache.shared.rawSVG(named: badgeName) else { return nil }
         return AnyView(SVGColorReplacementView(
             svgString: svgString,
             replacementColor: isCompleted ? color : .white,
