@@ -173,6 +173,15 @@ final class OrientationManager: ObservableObject {
         sessionStartTime != nil
     }
     
+    /// After a session begins, scene transitions (`.active`) and one-shot orientation checks can briefly
+    /// read "face up" before Core Motion stabilizes. Skip auto-complete / cancel in that window.
+    private static let scenePhaseFaceUpIgnoreGracePeriod: TimeInterval = 3.0
+    
+    func shouldIgnoreFaceUpFromScenePhaseCheck(now: Date = Date()) -> Bool {
+        guard let start = sessionStartTime else { return false }
+        return now.timeIntervalSince(start) < Self.scenePhaseFaceUpIgnoreGracePeriod
+    }
+    
     func endSession() {
         guard let startTime = sessionStartTime else { return }
         endHapticGenerator.notificationOccurred(.success)

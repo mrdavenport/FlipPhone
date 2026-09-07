@@ -20,6 +20,10 @@ private enum ScrollDirection {
 struct FullCalendarView: View {
     let sessions: [FocusSession]
     let user: User?
+    /// When non-nil, scrolls to this day’s month on open.
+    var initialDay: Date? = nil
+    /// When set, tapping a day calls this with start-of-day and does **not** present `DayDetailView` in a nested sheet (home updates bottom sheet instead).
+    var onPickDay: ((Date) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedDay: Date?
@@ -36,6 +40,19 @@ struct FullCalendarView: View {
     private let calendar = Calendar.current
     private var currentMonthStart: Date {
         calendar.dateInterval(of: .month, for: Date())!.start
+    }
+
+    private var initialDayStart: Date? {
+        guard let initialDay else { return nil }
+        return calendar.startOfDay(for: initialDay)
+    }
+
+    private func scrollTargetMonthID() -> String {
+        if let day = initialDayStart {
+            let monthStart = calendar.dateInterval(of: .month, for: day)!.start
+            return monthID(for: monthStart)
+        }
+        return currentMonthID
     }
 
     // All months from earliest session through next month (so current month can
@@ -108,12 +125,18 @@ struct FullCalendarView: View {
                 previousTopMonthMinY = best.minY
             }
             .onAppear {
-                proxy.scrollTo(currentMonthID, anchor: .top)
+                let targetMonthID = scrollTargetMonthID()
+                proxy.scrollTo(targetMonthID, anchor: .top)
                 if visibleMonthTitle.isEmpty {
-                    visibleMonthTitle = monthYearString(from: Date())
+                    visibleMonthTitle = monthYearString(from: initialDayStart ?? Date())
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     hasCompletedInitialScroll = true
+                }
+                if onPickDay == nil, let day = initialDayStart {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        selectedDay = day
+                    }
                 }
             }
             .overlay(alignment: .bottomTrailing) {
@@ -154,7 +177,8 @@ struct FullCalendarView: View {
                     month: month,
                     sessionsByDay: sessionsByDay,
                     excludedCategories: excludedCategories,
-                    selectedDay: $selectedDay
+                    selectedDay: $selectedDay,
+                    onPickDay: onPickDay
                 )
                 .id(monthID(for: month))
                 .background(
@@ -269,7 +293,7 @@ struct FullCalendarView: View {
             await BadgeImageCache.shared.prefetch(badges: badgePairs)
         }
         .sheet(item: Binding(
-            get: { selectedDay },
+            get: { onPickDay == nil ? selectedDay : nil },
             set: { selectedDay = $0 }
         )) { day in
             DayDetailView(day: day, sessions: sessions, user: user)
@@ -358,6 +382,7 @@ private struct MonthCalendarBlock: View {
     let sessionsByDay: [Date: [FocusSession]]
     let excludedCategories: Set<SessionCategory>
     @Binding var selectedDay: Date?
+    var onPickDay: ((Date) -> Void)? = nil
 
     private let calendar = Calendar.current
 
@@ -428,7 +453,11 @@ private struct MonthCalendarBlock: View {
                 let categoryColor = badgeColorForDay(date)
 
                 Button {
-                    if !isFuture, milestone != nil {
+                    if isFuture { return }
+                    let dayStart = calendar.startOfDay(for: date)
+                    if let onPickDay {
+                        onPickDay(dayStart)
+                    } else if milestone != nil {
                         selectedDay = date
                     }
                 } label: {
@@ -473,7 +502,7 @@ private struct MonthCalendarBlock: View {
                         }
                 }
                 .buttonStyle(.plain)
-                .disabled(isFuture || milestone == nil)
+                .disabled(isFuture || (onPickDay == nil && milestone == nil))
                 .id(isToday ? "today" : "day-\(date.timeIntervalSince1970)")
             } else {
                 Color.clear

@@ -144,265 +144,130 @@ struct FocusTrackingView: View {
     @State private var shouldRefireHeroBadgeAfterNextActivePhase = false
 
     var body: some View {
+        applySessionResultSheet(
+            to: applySessionLifecycle(
+                to: applyPrimarySheets(to: rootCanvas)
+            )
+        )
+    }
+
+    private var rootCanvas: some View {
         GeometryReader { proxy in
             let topInset = proxy.safeAreaInsets.top
             let screenHeight = proxy.size.height
-            
             mainContentView(topInset: topInset, screenHeight: screenHeight, proxy: proxy)
         }
         .ignoresSafeArea()
-        // Do not collapse the home bottom sheet here — only completing sessions do (see unified session sheet).
-        .sheet(isPresented: $showStreakStats) {
-            StreakStatsView(user: currentUser, sessions: sessions)
-                .presentationDragIndicator(.visible)
-                .presentationBackground(.black)
-        }
-        .sheet(isPresented: $showMilestones) {
-            MilestonesView(user: currentUser, sessions: sessions)
-                .presentationDragIndicator(.visible)
-                .presentationBackground(.black)
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
-        }
-        .sheet(isPresented: $showAddSession) {
-            AddSessionView { session in
-                saveManualSession(session)
-            }
-            .presentationDragIndicator(.visible)
-            .presentationBackground(.black)
-        }
-        .sheet(isPresented: $showFullCalendar, onDismiss: {
-            fullCalendarInitialDay = nil
-        }) {
-            FullCalendarView(
-                sessions: sessions,
-                user: currentUser,
-                initialDay: fullCalendarInitialDay,
-                onPickDay: { dayStart in
-                    let pickedDayID = Self.calendarDayID(for: dayStart)
-                    focusedCalendarDay = dayStart
-                    if let direction = dayTimelineDirection(from: sharedDayPagerSelectionID, to: pickedDayID) {
-                        dayTimelineCarouselDirection = direction
+    }
+
+    private func applyPrimarySheets<Content: View>(to content: Content) -> some View {
+        applyDebugAdminSheet(
+            to: content
+                .sheet(isPresented: $showStreakStats) {
+                    StreakStatsView(user: currentUser, sessions: sessions)
+                        .presentationDragIndicator(.visible)
+                        .presentationBackground(.black)
+                }
+                .sheet(isPresented: $showMilestones) {
+                    MilestonesView(user: currentUser, sessions: sessions)
+                        .presentationDragIndicator(.visible)
+                        .presentationBackground(.black)
+                }
+                .sheet(isPresented: $showSettings) {
+                    SettingsView()
+                }
+                .sheet(isPresented: $showAddSession) {
+                    AddSessionView { session in
+                        saveManualSession(session)
                     }
-                    withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.88, blendDuration: 0.2)) {
-                        sharedDayPagerSelectionID = pickedDayID
-                    }
-                    showFullCalendar = false
+                    .presentationDragIndicator(.visible)
+                    .presentationBackground(.black)
+                }
+                .sheet(isPresented: $showFullCalendar, onDismiss: {
                     fullCalendarInitialDay = nil
-                    setDailyBadgeMatchedGeometryActive(true)
-                    withAnimation(.spring(response: 0.58, dampingFraction: 0.88, blendDuration: 0.12)) {
-                        isBottomSheetExpanded = true
-                    }
+                }) {
+                    FullCalendarView(
+                        sessions: sessions,
+                        user: currentUser,
+                        initialDay: fullCalendarInitialDay,
+                        onPickDay: handleFullCalendarDayPick
+                    )
+                    .presentationBackground(.black)
                 }
-            )
-            .presentationBackground(.black)
-        }
-        .sheet(isPresented: $showHowToStart, onDismiss: {
-            hasSeenHowToStart = true
-        }) {
-            HowToStartView()
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(Color(UIColor.secondarySystemBackground))
-        }
+                .sheet(isPresented: $showHowToStart, onDismiss: {
+                    hasSeenHowToStart = true
+                }) {
+                    HowToStartView()
+                        .presentationDetents([.large])
+                        .presentationDragIndicator(.visible)
+                        .presentationBackground(Color(UIColor.secondarySystemBackground))
+                }
+        )
+    }
+
+    private func applyDebugAdminSheet<Content: View>(to content: Content) -> some View {
         #if DEBUG
-        .sheet(isPresented: $showDebugAdmin) {
-            DebugAdminView(
-                stepDuration: $animStepBaseDuration,
-                pauseDuration: $animStepPauseDuration,
-                sendHeroSessionSecondsWhenAnimating: Binding(
-                    get: { HeroRiveSessionSecondsAB.sendLastSessionDurationWhenAnimating },
-                    set: { HeroRiveSessionSecondsAB.sendLastSessionDurationWhenAnimating = $0 }
-                ),
-                disableBadgeMatchOnCollapse: $debugDisableBadgeMatchOnCollapse,
-                onSeedRandomSessions: { seedDebugRandomSessions() }
-            ) { testSeconds, fromZeroToday in
-                let priorTime = fromZeroToday ? 0 : todayTotalTime
-                let finalTime = fromZeroToday ? testSeconds : priorTime + testSeconds
-                // Set animation state before clearing the debug sheet so `heroSurfaceCoverPresented`
-                // onChange cannot run `bumpHeroCumulativeBadgeTriggerIfIdle()` while still idle — that
-                // would replace nil `displayedDailyMilestone` with `todayDailyMilestone` and skip the pre-5m flipphone_logo branch.
-                isAnimatingPostSession   = true
-                debugLevelUpSimulationActive = true
-                displayedDailyMilestone = Milestone.dayMilestoneForTotalTime(priorTime)
-                displayedTotalSeconds = priorTime
-                heroPostSessionCumulativeFloor = priorTime
-                heroRiveCumulativeSeconds = priorTime
-                heroBadgeUseLevelUpNumbers = false
-                heroLevelUpFromMilestone = nil
-                if fromZeroToday && priorTime == 0 {
-                    heroBadgeBurstTriggers = ["showCumulativeBadge"]
-                    heroCumulativeBadgeTriggerNonce += 1
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
-                        heroBadgeBurstTriggers = nil
-                    }
-                } else {
-                    heroBadgeBurstTriggers = nil
-                }
-                let steps = buildMilestoneSteps(priorTime: priorTime, finalTime: finalTime)
-                prepareForBottomSheetCollapseForDebug()
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
-                    isBottomSheetExpanded = false
-                }
-                showDebugAdmin = false
-                postSessionAnimationToken += 1
-                let sequenceToken = postSessionAnimationToken
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    guard sequenceToken == postSessionAnimationToken else { return }
-                    runMilestoneAnimation(steps: steps, index: 0, sequenceToken: sequenceToken)
-                }
-            }
-            .presentationDetents([.medium])
-            .presentationDragIndicator(.visible)
-            .presentationBackground(.black)
+        content.sheet(isPresented: $showDebugAdmin) {
+            debugAdminSheet
         }
+        #else
+        content
         #endif
-        .onAppear {
-            AnalyticsService.shared.logScreenView("FocusTracking")
-            sharedDayPagerSelectionID = Self.calendarDayID(for: focusedCalendarDay)
-            // Load hero Rive immediately (no delay)
-            heroRiveLoaded = true
-            // Check for day change to reset stars
-            checkForDayChange()
-            // Sync all display state instantly on first appear (no animation)
-            progressBarDisplayValue = dayProgressToNextMilestone
-            displayedTotalSeconds = totalTimeInSeconds
-            displayedDailyMilestone = todayDailyMilestone
-            heroPostSessionCumulativeFloor = 0
-            heroRiveCumulativeSeconds = 0
-            stripDailyBadgeRiveInstanceAnimated = heroCumulativeBadgeInstanceValue
-            // Auto-present how-to sheet for first-time users
-            if !hasSeenHowToStart {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                    showHowToStart = true
-                }
-            }
-        }
-        .onAppear {
-            orientationManager.startMonitoring()
-            ensureUserExists()
-            // Ensure idle timer is enabled so screen can sleep
-            UIApplication.shared.isIdleTimerDisabled = false
-            
-            // Check for recovered session on app launch
-            if !hasCheckedRecoveredSession {
-                checkForRecoveredSession()
-                hasCheckedRecoveredSession = true
-            }
-        }
-        .onChange(of: sessions.count) { oldCount, newCount in
-            // When sessions change, check for day change
-            checkForDayChange()
-        }
-        .onChange(of: totalTimeInSeconds) { _, newValue in
-            if !isAnimatingPostSession {
-                displayedTotalSeconds = newValue
-            }
-        }
-        .onChange(of: focusedCalendarDay) { _, newDay in
-            let id = Self.calendarDayID(for: Calendar.current.startOfDay(for: newDay))
-            if sharedDayPagerSelectionID != id {
-                if let direction = dayTimelineDirection(from: sharedDayPagerSelectionID, to: id) {
-                    dayTimelineCarouselDirection = direction
-                }
-                sharedDayPagerSelectionID = id
-            }
-        }
-        .onChange(of: sharedDayPagerSelectionID) { _, newID in
-            if let day = Self.date(fromCalendarDayID: newID) {
-                let dayStart = Calendar.current.startOfDay(for: day)
-                if !Calendar.current.isDate(dayStart, inSameDayAs: focusedCalendarDay) {
-                    focusedCalendarDay = dayStart
-                }
-            }
-        }
-        .onChange(of: selectedTimeframe) { _, _ in
-            if !isAnimatingPostSession {
-                displayedTotalSeconds = totalTimeInSeconds
-            }
-        }
-        .onChange(of: todayDailyMilestone?.id) { _, _ in
-            if !isAnimatingPostSession {
-                displayedDailyMilestone = todayDailyMilestone
-            }
-        }
-        .onChange(of: heroCumulativeBadgeInstanceValue) { _, newValue in
-            guard !isBottomSheetExpanded else { return }
-            var t = Transaction()
-            t.disablesAnimations = true
-            withTransaction(t) {
-                stripDailyBadgeRiveInstanceAnimated = newValue
-            }
-        }
-        .onDisappear {
-            orientationManager.stopMonitoring()
-        }
-        .onChange(of: scenePhase) { oldPhase, newPhase in
-            handleScenePhaseChange(from: oldPhase, to: newPhase)
-            if newPhase == .background {
-                shouldRefireHeroBadgeAfterNextActivePhase = true
-            }
-            if newPhase == .active, shouldRefireHeroBadgeAfterNextActivePhase {
-                shouldRefireHeroBadgeAfterNextActivePhase = false
-                if !orientationManager.isFaceDown {
-                    bumpHeroCumulativeBadgeTriggerIfIdle()
-                }
-            }
-        }
-        .onChange(of: orientationManager.isFaceDown) { oldValue, newValue in
-            if oldValue && !newValue {
-                // Phone flipped back up - handle session end
-                guard let startTime = orientationManager.sessionStartTime else {
-                    // No active session, just reset
-                    orientationManager.resetSession()
-                    return
-                }
-                
-                // Calculate duration using sessionDuration which accounts for paused time
-                let duration = orientationManager.sessionDuration
-                
-                // IMPORTANT: Stop timer immediately to prevent it from continuing
-                orientationManager.invalidateTimer()
-                
-                // End the session (this will trigger haptic and clear sessionStartTime)
-                orientationManager.endSession()
-                
-                // Complete session if duration is at least 5 seconds
-                if duration >= 5 {
-                    completeSession(startTime: startTime, duration: duration)
-                } else {
-                    // Session canceled (picked up before 5 seconds) - play cancel sound
-                    AudioService.shared.playCancelChime()
-                    orientationManager.resetSession()
-                }
-            }
-        }
-        .sheet(item: $sessionSheetContext, onDismiss: {
-            collapseBottomSheetForHomeReturn()
+    }
 
-            let frozenPrior = postSessionFrozenPriorTotal
-            postSessionFrozenPriorTotal = nil
+    #if DEBUG
+    private var debugAdminSheet: some View {
+        DebugAdminView(
+            stepDuration: $animStepBaseDuration,
+            pauseDuration: $animStepPauseDuration,
+            sendHeroSessionSecondsWhenAnimating: Binding(
+                get: { HeroRiveSessionSecondsAB.sendLastSessionDurationWhenAnimating },
+                set: { HeroRiveSessionSecondsAB.sendLastSessionDurationWhenAnimating = $0 }
+            ),
+            disableBadgeMatchOnCollapse: $debugDisableBadgeMatchOnCollapse,
+            onSeedRandomSessions: { seedDebugRandomSessions() },
+            onPlay: runDebugMilestoneSimulation
+        )
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(.black)
+    }
+    #endif
 
-            if let completedSession = justCompletedSession {
-                let priorTime = frozenPrior ?? max(0, todayTotalTime - completedSession.duration)
-                let finalTime = todayTotalTime
-                let steps = buildMilestoneSteps(priorTime: priorTime, finalTime: finalTime)
-                // Re-sync to pre-session tier (not `todayDailyMilestone`, which is already the final tier after save).
-                displayedDailyMilestone = Milestone.dayMilestoneForTotalTime(priorTime)
-                heroPostSessionCumulativeFloor = priorTime
-                heroRiveCumulativeSeconds = priorTime
-                justCompletedSession = nil
-
-                // Brief pause so the sheet dismiss animation clears before the sequence begins
-                postSessionAnimationToken += 1
-                let sequenceToken = postSessionAnimationToken
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    guard sequenceToken == postSessionAnimationToken else { return }
-                    runMilestoneAnimation(steps: steps, index: 0, sequenceToken: sequenceToken)
+    private func applySessionLifecycle<Content: View>(to content: Content) -> some View {
+        content
+            .onAppear(perform: handleTrackingAppear)
+            .onAppear(perform: handleOrientationAppear)
+            .onChange(of: sessions.count) { _, _ in
+                checkForDayChange()
+            }
+            .onChange(of: totalTimeInSeconds) { _, newValue in
+                if !isAnimatingPostSession {
+                    displayedTotalSeconds = newValue
                 }
             }
-        }) { context in
+            .onChange(of: focusedCalendarDay, handleFocusedCalendarDayChange)
+            .onChange(of: sharedDayPagerSelectionID, handleSharedDayPagerChange)
+            .onChange(of: selectedTimeframe) { _, _ in
+                if !isAnimatingPostSession {
+                    displayedTotalSeconds = totalTimeInSeconds
+                }
+            }
+            .onChange(of: todayDailyMilestone?.id) { _, _ in
+                if !isAnimatingPostSession {
+                    displayedDailyMilestone = todayDailyMilestone
+                }
+            }
+            .onChange(of: heroCumulativeBadgeInstanceValue, handleHeroCumulativeInstanceChange)
+            .onDisappear {
+                orientationManager.stopMonitoring()
+            }
+            .onChange(of: scenePhase, handleTrackingScenePhaseChange)
+            .onChange(of: orientationManager.isFaceDown, handleFaceDownSessionEnd)
+    }
+
+    private func applySessionResultSheet<Content: View>(to content: Content) -> some View {
+        content.sheet(item: $sessionSheetContext, onDismiss: handleSessionResultSheetDismiss) { context in
             SessionResultView(session: context.session, user: currentUser) {
                 switch context {
                 case .browsing:
@@ -411,6 +276,172 @@ struct FocusTrackingView: View {
                     justCompletedSession = context.session
                     sessionSheetContext = nil
                 }
+            }
+        }
+    }
+
+    private func handleFullCalendarDayPick(_ dayStart: Date) {
+        let pickedDayID = Self.calendarDayID(for: dayStart)
+        focusedCalendarDay = dayStart
+        if let direction = dayTimelineDirection(from: sharedDayPagerSelectionID, to: pickedDayID) {
+            dayTimelineCarouselDirection = direction
+        }
+        withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.88, blendDuration: 0.2)) {
+            sharedDayPagerSelectionID = pickedDayID
+        }
+        showFullCalendar = false
+        fullCalendarInitialDay = nil
+        setDailyBadgeMatchedGeometryActive(true)
+        withAnimation(.spring(response: 0.58, dampingFraction: 0.88, blendDuration: 0.12)) {
+            isBottomSheetExpanded = true
+        }
+    }
+
+    #if DEBUG
+    private func runDebugMilestoneSimulation(testSeconds: TimeInterval, fromZeroToday: Bool) {
+        let priorTime = fromZeroToday ? 0 : todayTotalTime
+        let finalTime = fromZeroToday ? testSeconds : priorTime + testSeconds
+        // Set animation state before clearing the debug sheet so `heroSurfaceCoverPresented`
+        // onChange cannot run `bumpHeroCumulativeBadgeTriggerIfIdle()` while still idle — that
+        // would replace nil `displayedDailyMilestone` with `todayDailyMilestone` and skip the pre-5m flipphone_logo branch.
+        isAnimatingPostSession = true
+        debugLevelUpSimulationActive = true
+        displayedDailyMilestone = Milestone.dayMilestoneForTotalTime(priorTime)
+        displayedTotalSeconds = priorTime
+        heroPostSessionCumulativeFloor = priorTime
+        heroRiveCumulativeSeconds = priorTime
+        heroBadgeUseLevelUpNumbers = false
+        heroLevelUpFromMilestone = nil
+        if fromZeroToday && priorTime == 0 {
+            heroBadgeBurstTriggers = ["showCumulativeBadge"]
+            heroCumulativeBadgeTriggerNonce += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                heroBadgeBurstTriggers = nil
+            }
+        } else {
+            heroBadgeBurstTriggers = nil
+        }
+        let steps = buildMilestoneSteps(priorTime: priorTime, finalTime: finalTime)
+        prepareForBottomSheetCollapseForDebug()
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+            isBottomSheetExpanded = false
+        }
+        showDebugAdmin = false
+        postSessionAnimationToken += 1
+        let sequenceToken = postSessionAnimationToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            guard sequenceToken == postSessionAnimationToken else { return }
+            runMilestoneAnimation(steps: steps, index: 0, sequenceToken: sequenceToken)
+        }
+    }
+    #endif
+
+    private func handleTrackingAppear() {
+        AnalyticsService.shared.logScreenView("FocusTracking")
+        sharedDayPagerSelectionID = Self.calendarDayID(for: focusedCalendarDay)
+        heroRiveLoaded = true
+        checkForDayChange()
+        progressBarDisplayValue = dayProgressToNextMilestone
+        displayedTotalSeconds = totalTimeInSeconds
+        displayedDailyMilestone = todayDailyMilestone
+        heroPostSessionCumulativeFloor = 0
+        heroRiveCumulativeSeconds = 0
+        stripDailyBadgeRiveInstanceAnimated = heroCumulativeBadgeInstanceValue
+        if !hasSeenHowToStart {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                showHowToStart = true
+            }
+        }
+    }
+
+    private func handleOrientationAppear() {
+        orientationManager.startMonitoring()
+        ensureUserExists()
+        UIApplication.shared.isIdleTimerDisabled = false
+        if !hasCheckedRecoveredSession {
+            checkForRecoveredSession()
+            hasCheckedRecoveredSession = true
+        }
+    }
+
+    private func handleFocusedCalendarDayChange(_ oldDay: Date, _ newDay: Date) {
+        let id = Self.calendarDayID(for: Calendar.current.startOfDay(for: newDay))
+        if sharedDayPagerSelectionID != id {
+            if let direction = dayTimelineDirection(from: sharedDayPagerSelectionID, to: id) {
+                dayTimelineCarouselDirection = direction
+            }
+            sharedDayPagerSelectionID = id
+        }
+    }
+
+    private func handleSharedDayPagerChange(_ oldID: String, _ newID: String) {
+        if let day = Self.date(fromCalendarDayID: newID) {
+            let dayStart = Calendar.current.startOfDay(for: day)
+            if !Calendar.current.isDate(dayStart, inSameDayAs: focusedCalendarDay) {
+                focusedCalendarDay = dayStart
+            }
+        }
+    }
+
+    private func handleHeroCumulativeInstanceChange(_ oldValue: Double, _ newValue: Double) {
+        guard !isBottomSheetExpanded else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            stripDailyBadgeRiveInstanceAnimated = newValue
+        }
+    }
+
+    private func handleTrackingScenePhaseChange(_ oldPhase: ScenePhase, _ newPhase: ScenePhase) {
+        handleScenePhaseChange(from: oldPhase, to: newPhase)
+        if newPhase == .background {
+            shouldRefireHeroBadgeAfterNextActivePhase = true
+        }
+        if newPhase == .active, shouldRefireHeroBadgeAfterNextActivePhase {
+            shouldRefireHeroBadgeAfterNextActivePhase = false
+            if !orientationManager.isFaceDown {
+                bumpHeroCumulativeBadgeTriggerIfIdle()
+            }
+        }
+    }
+
+    private func handleFaceDownSessionEnd(_ oldValue: Bool, _ newValue: Bool) {
+        guard oldValue && !newValue else { return }
+        guard let startTime = orientationManager.sessionStartTime else {
+            orientationManager.resetSession()
+            return
+        }
+        let duration = orientationManager.sessionDuration
+        orientationManager.invalidateTimer()
+        orientationManager.endSession()
+        if duration >= 5 {
+            completeSession(startTime: startTime, duration: duration)
+        } else {
+            AudioService.shared.playCancelChime()
+            orientationManager.resetSession()
+        }
+    }
+
+    private func handleSessionResultSheetDismiss() {
+        collapseBottomSheetForHomeReturn()
+
+        let frozenPrior = postSessionFrozenPriorTotal
+        postSessionFrozenPriorTotal = nil
+
+        if let completedSession = justCompletedSession {
+            let priorTime = frozenPrior ?? max(0, todayTotalTime - completedSession.duration)
+            let finalTime = todayTotalTime
+            let steps = buildMilestoneSteps(priorTime: priorTime, finalTime: finalTime)
+            displayedDailyMilestone = Milestone.dayMilestoneForTotalTime(priorTime)
+            heroPostSessionCumulativeFloor = priorTime
+            heroRiveCumulativeSeconds = priorTime
+            justCompletedSession = nil
+
+            postSessionAnimationToken += 1
+            let sequenceToken = postSessionAnimationToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                guard sequenceToken == postSessionAnimationToken else { return }
+                runMilestoneAnimation(steps: steps, index: 0, sequenceToken: sequenceToken)
             }
         }
     }
@@ -2566,8 +2597,8 @@ struct FocusTrackingView: View {
                 stateName: "hero",
                 animationName: nil,
                 uniqueId: "toolbar-logo",
-                artboardName: "flipPhone_animations",
-                instanceValue: 0.0
+                artboardName: nil,
+                instanceValue: 3.0
             )
             .frame(width: 44, height: 44)
         } else {
@@ -2613,7 +2644,7 @@ struct FocusTrackingView: View {
                             stateName: "hero",  // State for hero/home screen
                             animationName: nil,
                             uniqueId: "hero-view",
-                            artboardName: "flipPhone_animations",
+                            artboardName: "hero animation",
                             instanceValue: 0.0
                         )
                             .frame(width: min(geometry.size.width, 500), height: min(geometry.size.width, 500))

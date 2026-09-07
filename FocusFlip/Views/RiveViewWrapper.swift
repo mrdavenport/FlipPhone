@@ -777,19 +777,14 @@ struct RiveViewWrapper: UIViewRepresentable {
                     self.riveFile = riveFile
                     print("✅ Loaded RiveFile in Coordinator for '\(fileName)'")
 
-                    // Build RiveViewModel from the already-parsed RiveFile so no second parse occurs.
+                    let resolvedArtboard = self.resolvedArtboardName(in: riveFile)
                     let model = RiveModel(riveFile: riveFile)
-                    self.viewModel = RiveViewModel(model, stateMachineName: nil, artboardName: artboardName)
-                    print("✅ Created RiveViewModel from RiveFile for '\(fileName)' artboard: '\(artboardName ?? "default")'")
+                    self.viewModel = RiveViewModel(model, stateMachineName: nil, artboardName: resolvedArtboard)
+                    print("✅ Created RiveViewModel from RiveFile for '\(fileName)' artboard: '\(resolvedArtboard ?? "default")'")
                 } catch {
                     print("⚠️ Failed to load RiveFile for '\(fileName)': \(error) — falling back to fileName init")
-                    // RiveViewModel(fileName:) does its own synchronous file load (slower but safe).
-                    // These inits do not throw in SDK v6.15, so no try/catch needed.
-                    if let artboardName = artboardName {
-                        self.viewModel = RiveViewModel(fileName: fileName, artboardName: artboardName)
-                    } else {
-                        self.viewModel = RiveViewModel(fileName: fileName, artboardName: "flipPhone_animations")
-                    }
+                    // Avoid passing a possibly-invalid artboard name: RiveViewModel uses `try!` internally.
+                    self.viewModel = RiveViewModel(fileName: fileName)
                     print("✅ Created RiveViewModel (fallback fileName init) for '\(fileName)'")
                 }
             }
@@ -1171,6 +1166,16 @@ struct RiveViewWrapper: UIViewRepresentable {
             riveLog("🎬 Animation '\(animationName)' should play via state machine")
         }
         
+        func resolvedArtboardName(in riveFile: RiveFile) -> String? {
+            guard let requested = artboardName, !requested.isEmpty else { return nil }
+            if (try? riveFile.artboard(fromName: requested)) != nil {
+                return requested
+            }
+            print("⚠️ [\(uniqueId)] Artboard '\(requested)' not found in '\(fileName)' — using default")
+            debugArtboards()
+            return nil
+        }
+
         func debugArtboards() {
             // Helper function to list all available artboards in a Rive file
             guard let riveFile = riveFile else {

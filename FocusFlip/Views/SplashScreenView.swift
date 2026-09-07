@@ -22,20 +22,22 @@ struct SplashScreenView: View {
                 // Priority: Rive -> Video -> Fallback text
                 Group {
                     #if canImport(RiveRuntime)
-                    if Bundle.main.url(forResource: "flipphone_hero", withExtension: "riv") != nil {
+                    if Bundle.main.url(forResource: "flipphone_logo", withExtension: "riv") != nil {
+                        // Same logo instance as SessionResultView header — not `hero animation`,
+                        // which is the daily milestone badge / shooting-star scene.
                         RiveViewWrapperNewAPI(
-                            fileName: "flipphone_hero",
+                            fileName: "flipphone_logo",
                             autoPlay: true,
-                            stateName: "splash",  // State for splash screen
+                            stateName: "hero",
                             animationName: nil,
                             uniqueId: "splash-view",
-                            artboardName: "hero animation",  // Artboard with ViewModel and data bindings
-                            instanceValue: 2.0,
+                            artboardName: nil,
+                            instanceValue: 3.0,
                             colorInputs: [
                                 "themeColor": ThemeManager.defaultColor
                             ],
                             artboardInputs: nil,
-                            triggerInputs: ["splashStart"]
+                            triggerInputs: nil
                         )
                         .frame(width: 200, height: 200)
                         .opacity(isAnimating ? 1 : 0)
